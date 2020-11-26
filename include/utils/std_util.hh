@@ -2,11 +2,32 @@
 #include <functional>
 #include <unordered_map>
 #include <tuple>
-
-// #include <execution> c++17
+#include <string>
+#include <sstream>
+#include <vector>
 
 #ifndef STD_UTIL_HH_
 #define STD_UTIL_HH_
+
+char *
+str2char(const std::string &s)
+{
+    char *ret = new char[s.size() + 1];
+    std::strcpy(ret, s.c_str());
+    return ret;
+}
+
+std::vector<std::string>
+split(const std::string &s, char delim)
+{
+    std::stringstream ss(s);
+    std::string item;
+    std::vector<std::string> elems;
+    while (std::getline(ss, item, delim)) {
+        elems.push_back(std::move(item));
+    }
+    return elems;
+}
 
 template <typename Vec>
 auto
@@ -70,7 +91,7 @@ make_index_vec_vec(const std::vector<I> &_id)
 
     const I nn = *std::max_element(_id.begin(), _id.end()) + 1;
 
-    vec_ivec ret(nn, std::vector<I>{});
+    vec_ivec ret(nn, std::vector<I> {});
 
     for (I i = 0; i < _id.size(); ++i) {
         const I k = _id.at(i);

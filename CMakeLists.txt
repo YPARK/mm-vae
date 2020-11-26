@@ -6,6 +6,7 @@ project(mmvae
 
 find_package(Torch REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(Eigen3 3.3 REQUIRED)
 
 include_directories(/usr/local/include)
 link_directories(/usr/local/lib)
@@ -52,17 +53,16 @@ target_include_directories(bgzslib PUBLIC
 # Executable #
 ##############
 
-file(GLOB mmvae_SRC
-  "include/*.hh"
-  "include/utils/*.h"
-  "include/utils/*.hh"
+add_executable(nbvae
+  src/nbvae_main.cc
+  include/mmvae.hh
+  include/mmvae_io.hh
+  include/models/nb.hh
+  ${util_SRC}
   )
 
-add_executable(mmvae mmvae_main.cc mmvae.hh ${mmvae_SRC})
-target_include_directories(mmvae PUBLIC include)
+target_include_directories(nbvae PUBLIC include include/models)
+target_link_libraries(nbvae "${TORCH_LIBRARIES}")
+target_link_libraries(nbvae ZLIB::ZLIB gzslib bgzslib bgzf)
+set_property(TARGET nbvae PROPERTY CXX_STANDARD 14)
 
-target_link_libraries(mmvae "${TORCH_LIBRARIES}")
-target_link_libraries(mmvae ZLIB::ZLIB gzslib bgzslib bgzf)
-
-
-set_property(TARGET mmvae PROPERTY CXX_STANDARD 14)

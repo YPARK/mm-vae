@@ -15,6 +15,8 @@
 
 std::string curr_time();
 
+std::string zeropad(const int t, const int tmax);
+
 #define TLOG(msg)                                                    \
     {                                                                \
         std::cerr << "[" << curr_time() << "] " << msg << std::endl; \
@@ -77,7 +79,9 @@ std::string curr_time();
         }                        \
     }
 
-std::string zeropad(const int t, const int tmax);
+////////////////////
+// implementation //
+////////////////////
 
 std::string
 curr_time()

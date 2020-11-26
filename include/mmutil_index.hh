@@ -115,7 +115,7 @@ struct mm_info_reader_t {
         max_elem = 0;
     }
 
-    void set_file(BGZF *_fp) {}
+    void set_file(BGZF *_fp) { }
 
     void eval_after_header(const index_t r, const index_t c, const index_t e)
     {
@@ -126,14 +126,18 @@ struct mm_info_reader_t {
     index_t max_row;
     index_t max_col;
     index_t max_elem;
+    const index_t rows() const { return max_row; }
+    const index_t cols() const { return max_col; }
+    const index_t nnz() const { return max_elem; }
 };
 
 ///////////////////////////////////////
 // index bgzipped matrix market file //
 ///////////////////////////////////////
 
-int build_mmutil_index(std::string mtx_file,        // bgzip file
-                       std::string index_file = "") // index file
+int
+build_mmutil_index(std::string mtx_file,        // bgzip file
+                   std::string index_file = "") // index file
 {
 
     if (index_file.length() == 0) {
@@ -232,14 +236,14 @@ struct _index_checker_t {
 
     void set_file(BGZF *_fp) { fp = _fp; }
 
-    void eval_after_header(const Index r, const Index c, const Index e) {}
+    void eval_after_header(const Index r, const Index c, const Index e) { }
 
     void eval(const Index row, const Index col, const Scalar weight)
     {
         _found = col;
     }
 
-    void eval_end_of_file() {}
+    void eval_end_of_file() { }
 
     BGZF *fp;
 
