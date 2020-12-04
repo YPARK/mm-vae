@@ -119,9 +119,44 @@ parse_training_options(const int argc,
     return EXIT_SUCCESS;
 }
 
-template <typename MODEL_PTR, typename RECORDER, typename DATA_BLOCK>
+template <typename VISITOR, typename DATA_BLOCK>
 void
-visit_vae_model(MODEL_PTR model, RECORDER &recorder, DATA_BLOCK &data_block)
+visit_data(VISITOR &visitor, DATA_BLOCK &data_block)
+{
+    const int64_t ntot = data_block.ntot();
+    const int64_t batch_size = data_block.size();
+    int64_t nbatch = ntot / data_block.size();
+    if ((nbatch * data_block.size()) < ntot) {
+        ++nbatch;
+    }
+
+    std::vector<typename DATA_BLOCK::Index> batch(data_block.size());
+
+    TLOG("Batch size = " << data_block.size() << ", "
+                         << "Number of batches = " << nbatch);
+
+    torch::Device device(torch::kCPU);
+
+    for (int64_t b = 0; b < nbatch; ++b) {
+
+        const int64_t lb = b * data_block.size();
+        const int64_t ub = (b + 1) * data_block.size();
+
+        for (int64_t j = 0; j < (ub - lb); ++j) {
+            batch[j] = (lb + j) % ntot;
+        }
+
+        data_block.read(batch);
+        visitor.update_on_batch(data_block, batch);
+        data_block.clear();
+    }
+
+    TLOG("Done visit");
+}
+
+template <typename MODEL_PTR, typename VISITOR, typename DATA_BLOCK>
+void
+visit_vae_model(MODEL_PTR model, VISITOR &visitor, DATA_BLOCK &data_block)
 {
     const int64_t ntot = data_block.ntot();
     const int64_t batch_size = data_block.size();
@@ -149,7 +184,7 @@ visit_vae_model(MODEL_PTR model, RECORDER &recorder, DATA_BLOCK &data_block)
         }
 
         data_block.read(batch);
-        recorder.update(model, data_block, batch);
+        visitor.update_on_batch(model, data_block, batch);
         data_block.clear();
     }
 
@@ -157,12 +192,12 @@ visit_vae_model(MODEL_PTR model, RECORDER &recorder, DATA_BLOCK &data_block)
 }
 
 template <typename MODEL_PTR,
-          typename RECORDER,
+          typename VISITOR,
           typename DATA_BLOCK,
           typename LOSS>
 void
 train_vae_model(MODEL_PTR model,
-                RECORDER &recorder,
+                VISITOR &visitor,
                 DATA_BLOCK &data_block,
                 training_options_t &opt,
                 LOSS loss_fun)
@@ -249,7 +284,7 @@ train_vae_model(MODEL_PTR model,
             }
 
             if ((epoch + 1) % opt.recording == 0) {
-                recorder.update(model, data_block, batch);
+                visitor.update_on_batch(model, data_block, batch);
             }
             data_block.clear();
         }
@@ -260,7 +295,7 @@ train_vae_model(MODEL_PTR model,
         TLOG("t=" << (epoch + 1) << " " << _loss_epoch);
 
         if ((epoch + 1) % opt.recording == 0) {
-            recorder.write(zeropad(epoch + 1, opt.max_epoch));
+            visitor.update_on_epoch(model, data_block, batch);
         }
     }
     TLOG("Done training");

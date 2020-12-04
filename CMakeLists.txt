@@ -53,16 +53,28 @@ target_include_directories(bgzslib PUBLIC
 # Executable #
 ##############
 
-add_executable(nbvae
-  src/nbvae_main.cc
+add_executable(nb_vae
+  src/nb_vae_main.cc
   include/mmvae.hh
   include/mmvae_io.hh
   include/models/nb.hh
-  ${util_SRC}
   )
 
-target_include_directories(nbvae PUBLIC include include/models)
-target_link_libraries(nbvae "${TORCH_LIBRARIES}")
-target_link_libraries(nbvae ZLIB::ZLIB gzslib bgzslib bgzf)
-set_property(TARGET nbvae PROPERTY CXX_STANDARD 14)
+target_include_directories(nb_vae PUBLIC include include/models include/modules)
+target_link_libraries(nb_vae "${TORCH_LIBRARIES}")
+target_link_libraries(nb_vae ZLIB::ZLIB gzslib bgzslib bgzf)
+set_property(TARGET nb_vae PROPERTY CXX_STANDARD 14)
+
+add_executable(vmf_vae
+  src/vmf_vae_main.cc
+  include/mmvae.hh
+  include/operators.hh
+  include/mmvae_io.hh
+  include/modules/angular.hh
+  )
+
+target_include_directories(vmf_vae PUBLIC include include/models include/modules)
+target_link_libraries(vmf_vae "${TORCH_LIBRARIES}")
+target_link_libraries(vmf_vae ZLIB::ZLIB gzslib bgzslib bgzf)
+set_property(TARGET vmf_vae PROPERTY CXX_STANDARD 14)
 

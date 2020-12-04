@@ -1,26 +1,35 @@
 #include "mmvae.hh"
 #include "mmvae_io.hh"
 #include "mmvae_alg.hh"
-#include "nb.hh"
 #include "vmf.hh"
 #include "util.hh"
 #include "std_util.hh"
 #include "io.hh"
+
 #include <random>
 #include <chrono>
 
-struct nbvae_recorder_t {
+struct vmf_vae_recorder_t {
 
     using Mat =
         Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
-    explicit nbvae_recorder_t(const std::string _hdr)
+    explicit vmf_vae_recorder_t(const std::string _hdr,
+                                const int64_t _max_epoch)
         : header(_hdr)
+        , epoch(0)
+        , max_epoch(_max_epoch)
     {
     }
 
     template <typename MODEL, typename DB, typename BAT>
-    void update(MODEL &model, DB &db, BAT &batches)
+    void update_on_epoch(MODEL &model, DB &db, BAT &batches)
+    {
+        write(zeropad(++epoch, max_epoch));
+    }
+
+    template <typename MODEL, typename DB, typename BAT>
+    void update_on_batch(MODEL &model, DB &db, BAT &batches)
     {
         model->train(false); // freeze the model
 
@@ -30,7 +39,7 @@ struct nbvae_recorder_t {
         // output mu encoder //
         ///////////////////////
 
-        auto mu_out = model->encode_mu(db.torch_tensor().to(torch::kCPU));
+        auto mu_out = model->encode(db.torch_tensor().to(torch::kCPU));
         torch::Tensor _mean = std::get<0>(mu_out);
         torch::Tensor _lnvar = std::get<1>(mu_out);
 
@@ -65,20 +74,24 @@ struct nbvae_recorder_t {
     {
         const std::string _hdr_tag =
             tag.size() > 0 ? (header + "_" + tag) : header;
-        write_data_file(_hdr_tag + ".mu_mean.gz", mean_out);
-        write_data_file(_hdr_tag + ".mu_lnvar.gz", lnvar_out);
+        write_data_file(_hdr_tag + ".latent_mean.gz", mean_out);
+        write_data_file(_hdr_tag + ".latent_lnvar.gz", lnvar_out);
     }
 
     const std::string header; // file header
+    int64_t epoch;
+    const int64_t max_epoch;
     Mat mean_out, lnvar_out;
 };
 
-struct nb_loss_t {
+// More customized loss function
+struct vmf_loss_t {
 
-    nb_loss_t()
+    vmf_loss_t()
     {
         time_discount = 0.0;
-        min_rate = 1e-4;
+        min_rate = 1;
+        max_rate = 1;
     }
 
     /// @param x observed data
@@ -88,11 +101,12 @@ struct nb_loss_t {
     torch::Tensor operator()(X x, Y y, const int64_t epoch)
     {
         float t = static_cast<float>(epoch);
-        float rate = std::exp(-time_discount * t);
-        return mmvae::nb::loss(x, y, std::max(rate, min_rate));
+        float rate = max_rate * std::exp(-time_discount * t);
+        return mmvae::vmf::vmf_vae_loss(x, y, std::max(rate, min_rate));
     }
 
     float time_discount;
+    float max_rate;
     float min_rate;
 };
 
@@ -100,18 +114,18 @@ int
 main(const int argc, const char *argv[])
 {
 
+    using namespace mmvae::vmf;
+
     mmvae_options_t main_options;
     training_options_t train_opt;
-    mmvae::nb::nbvae_options_t vae_opt;
+    vmf_options_t vmf_opt;
 
     CHK(parse_mmvae_options(argc, argv, main_options));
-    CHK(parse_nbvae_options(argc, argv, vae_opt));
+    CHK(parse_vmf_options(argc, argv, vmf_opt));
     CHK(parse_training_options(argc, argv, train_opt));
 
     if (!file_exists(main_options.mtx))
         return EXIT_FAILURE;
-
-    using data_t = mmvae::mtx_data_block_t;
 
     const auto mtx_file = main_options.mtx;
     const auto idx_file = main_options.idx;
@@ -119,49 +133,41 @@ main(const int argc, const char *argv[])
     if (!file_exists(idx_file))
         CHK(mmutil::index::build_mmutil_index(mtx_file, idx_file));
 
-    const int64_t batch_size = main_options.batch_size;
-
     // data loader from the .mtx file
-    data_t data_block(mtx_file, idx_file, batch_size);
+    const int64_t batch_size = main_options.batch_size;
+    mmvae::mtx_data_block_t data_block(mtx_file, idx_file, batch_size);
 
     TLOG("Constructing a model");
-    std::vector<mmvae::nb::mu_encoder_h_dim> henc;
-    std::vector<mmvae::nb::mu_decoder_h_dim> hdec;
+    std::vector<mmvae::vmf::z_enc_dim> henc;
+    std::vector<mmvae::vmf::z_dec_dim> hdec;
 
-    std::transform(std::begin(vae_opt.mean_encoding_layers),
-                   std::end(vae_opt.mean_encoding_layers),
+    std::transform(std::begin(vmf_opt.encoding_layers),
+                   std::end(vmf_opt.encoding_layers),
                    std::back_inserter(henc),
-                   [](const int64_t d) {
-                       return mmvae::nb::mu_encoder_h_dim(d);
-                   });
+                   [](const int64_t d) { return mmvae::vmf::z_enc_dim(d); });
 
-    std::transform(std::begin(vae_opt.mean_decoding_layers),
-                   std::end(vae_opt.mean_decoding_layers),
+    std::transform(std::begin(vmf_opt.decoding_layers),
+                   std::end(vmf_opt.decoding_layers),
                    std::back_inserter(hdec),
-                   [](const int64_t d) {
-                       return mmvae::nb::mu_decoder_h_dim(d);
-                   });
+                   [](const int64_t d) { return mmvae::vmf::z_dec_dim(d); });
 
-    mmvae::nb::nbvae_t model(mmvae::nb::data_dim(data_block.nfeature()),
-                             henc,
-                             hdec,
-                             mmvae::nb::mu_encoder_r_dim(vae_opt.mean_latent),
-                             mmvae::nb::nu_encoder_h_dim(
-                                 vae_opt.overdispersion_encoding),
-                             mmvae::nb::nu_encoder_r_dim(
-                                 vae_opt.overdispersion_latent),
-                             false);
+    mmvae::vmf::vmf_vae_t model(mmvae::vmf::data_dim(data_block.nfeature()),
+                                mmvae::vmf::z_repr_dim(vmf_opt.latent),
+                                henc,
+                                hdec,
+                                mmvae::vmf::kappa_min(vmf_opt.kappa_min),
+                                mmvae::vmf::kappa_max(vmf_opt.kappa_max),
+                                vmf_opt.do_relu);
 
-    nbvae_recorder_t recorder(main_options.out);
+    vmf_vae_recorder_t recorder(main_options.out, train_opt.max_epoch);
 
-    nb_loss_t loss;
+    vmf_loss_t loss;
+    loss.min_rate = main_options.kl_min;
+    loss.max_rate = main_options.kl_max;
     loss.time_discount = main_options.kl_discount;
 
     train_vae_model(model, recorder, data_block, train_opt, loss);
-    TLOG("Writing down results...");
 
-    visit_vae_model(model, recorder, data_block);
-    recorder.write("");
     TLOG("Done");
     return EXIT_SUCCESS;
 }

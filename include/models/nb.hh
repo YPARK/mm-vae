@@ -7,11 +7,21 @@
 #include "std_util.hh"
 #include <getopt.h>
 #include <cstring>
+#include "angular.hh"
 
 #ifndef MMVAE_NB_MODEL_HH_
 #define MMVAE_NB_MODEL_HH_
 
 namespace mmvae { namespace nb {
+
+const char *_model_desc = "Likelihood:\n"
+                          "     Γ(x + ν)        μ           ν   \n"
+                          "x ~ ------------ ( ----- )^x ( ----- )^ν\n"
+                          "    Γ(x + 1)Γ(ν)   μ + ν       μ + ν\n"
+                          "\n"
+                          "μ = exp(decoding(z_μ) + bias_μ)\n"
+                          "ν = exp(decoding(z_ν) + bias_ν)\n"
+                          "\n";
 
 ///////////////////////
 // define dimensions //
@@ -44,7 +54,7 @@ struct nbvae_options_t {
     {
         // default options
         do_relu = false;
-        mean_latent = 0;
+        mean_latent = 2;
         overdispersion_encoding = 1;
         overdispersion_latent = 1;
     }
@@ -63,15 +73,6 @@ parse_nbvae_options(const int argc,
                     nbvae_options_t &options)
 {
     const char *_usage =
-        "[Data generation scheme]\n"
-        "\n"
-        "     Γ(x + ν)        μ           ν   \n"
-        "x ~ ------------ ( ----- )^x ( ----- )^ν\n"
-        "    Γ(x + 1)Γ(ν)   μ + ν       μ + ν\n"
-        "\n"
-        "μ = exp(decoding(z_μ) + bias_μ)\n"
-        "ν = exp(decoding(z_ν) + bias_ν)\n"
-        "\n"
         "[Negative Binomial VAE options]\n"
         "\n"
         "--mean_encoding     : dims for mean encoding layers (e.g., 10,10)\n"
@@ -174,6 +175,7 @@ parse_nbvae_options(const int argc,
             break;
 
         case 'h': // -h or --help
+            std::cerr << _model_desc << std::endl;
             std::cerr << _usage << std::endl;
             for (std::size_t i = 0; i < argv_copy.size(); i++)
                 delete[] argv_copy[i];
@@ -189,16 +191,6 @@ parse_nbvae_options(const int argc,
 
     for (std::size_t i = 0; i < argv_copy.size(); i++)
         delete[] argv_copy[i];
-
-    TLOG("here!");
-
-    ERR_RET(options.mean_encoding_layers.size() < 1,
-            "specify the dims for mean encoding layers");
-
-    ERR_RET(options.mean_decoding_layers.size() < 1,
-            "specify the dims for mean decoding layers");
-
-    ERR_RET(options.mean_latent < 1, "specify the dim for mean latent");
 
     return EXIT_SUCCESS;
 }
@@ -219,8 +211,6 @@ struct nbvae_out_t {
 };
 
 struct nbvae_tImpl : torch::nn::Module {
-
-    using T = torch::Tensor;
 
     explicit nbvae_tImpl(const data_dim,
                          const std::vector<mu_encoder_h_dim>,
@@ -277,9 +267,6 @@ private:
 
     torch::nn::Sequential mu_dec;
 
-    // torch::nn::Linear mu_dec_1 { nullptr };
-    // torch::nn::Linear mu_dec_2 { nullptr };
-
     torch::nn::Linear nu_enc { nullptr };
 
     torch::nn::Linear nu_repr_mean { nullptr };
@@ -327,7 +314,8 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     // hidden encoding layers for mu //
     ///////////////////////////////////
 
-    ASSERT(_eh_vec.size() > 0, "at least one dim info for a hidden layer(s)");
+    // ASSERT(_eh_vec.size() > 0, "at least one dim info for a hidden
+    // layer(s)");
     _copy_dim_vec(_eh_vec, mu_eh_dim_vec);
 
     // Add hidden layers between x and representation
@@ -340,8 +328,18 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
         d_prev = d_next;
     }
 
+    // Add final one mapping to the latent
+    if (mu_eh_dim_vec.size() < 1) {
+        mu_enc->push_back(torch::nn::Linear(d_prev, mu_r_dim));
+        if (do_relu)
+            mu_enc->push_back(torch::nn::ReLU(mu_r_dim));
+
+        d_prev = mu_r_dim;
+    }
+
     mu_repr_mean = register_module("mu: representation mean",
                                    torch::nn::Linear(d_prev, mu_r_dim));
+
     mu_repr_lnvar = register_module("mu: representation log variance",
                                     torch::nn::Linear(d_prev, mu_r_dim));
 
@@ -349,14 +347,14 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     // hidden decoding layers for mu //
     ///////////////////////////////////
 
-    ASSERT(_dh_vec.size() > 0, "at least one dim info for a hidden layer(s)");
+    // ASSERT(_dh_vec.size() > 0, "at least one dim info for a hidden
+    // layer(s)");
     _copy_dim_vec(_dh_vec, mu_dh_dim_vec);
 
     // Add hidden layers between representation and x
     d_prev = mu_r_dim;
-    int64_t d_next;
     for (int l = 0; l < mu_dh_dim_vec.size(); ++l) {
-        d_next = mu_dh_dim_vec[l];
+        int64_t d_next = mu_dh_dim_vec[l];
         const std::string _str = "mu: decoding " + std::to_string(l + 1);
         mu_dec->push_back(torch::nn::Linear(d_prev, d_next));
         if (do_relu)
@@ -364,10 +362,8 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
         d_prev = d_next;
     }
 
-    // Add final one mapping to the reconstruction if needed
-    if (d_next != x_dim) {
-        mu_dec->push_back(torch::nn::Linear(d_prev, x_dim));
-    }
+    // Add final one mapping to the reconstruction
+    mu_dec->push_back(torch::nn::Linear(d_prev, x_dim));
 
     ///////////////////////////////////
     // hidden encoding layers for nu //

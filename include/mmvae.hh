@@ -16,10 +16,14 @@
 #include "mmutil_index.hh"
 #include "mmutil_bgzf_util.hh"
 
-#ifndef TORCH_INC_H_     // Prevent torch
-#define TORCH_INC_H_     // from reloading
-#include <torch/torch.h> //
-#endif                   // End of torch
+#ifndef TORCH_INC_H_                               // Prevent torch
+#define TORCH_INC_H_                               // from reloading
+#include <torch/torch.h>                           //
+#include <torch/csrc/autograd/variable.h>          //
+#include <torch/csrc/autograd/function.h>          //
+#include <torch/csrc/autograd/VariableTypeUtils.h> //
+#include <torch/csrc/autograd/functions/utils.h>   //
+#endif                                             // End of torch
 
 #include <getopt.h>
 
@@ -31,14 +35,20 @@ struct mmvae_options_t {
         batch_size = 100;
         kl_discount = 0.;
         kl_min = 1.;
+        kl_max = 1.;
     }
 
     std::string mtx;
     std::string idx;
     std::string out;
+    std::string row;
+    std::string col;
+    std::string annot;
+
     int64_t batch_size;
     float kl_discount;
     float kl_min;
+    float kl_max;
 };
 
 int
@@ -50,27 +60,37 @@ parse_mmvae_options(const int argc,
         "\n"
         "[options]\n"
         "\n"
-        "--mtx         : matrix market mtx file\n"
-        "--idx         : matrix market mtx index file (default: ${mtx}.index\n"
+        "--mtx         : a matrix market mtx file\n"
+        "--idx         : a matrix market mtx index file (default: ${mtx}.index)\n"
+        "--row         : the rows (line = one string)\n"
+        "--col         : the columns (line = one string)\n"
+        "--annot       : the list of column annotations (line = ${col} <space> ${k})\n"
         "--out         : output file header\n"
         "--batch_size  : #samples in each batch (default: 100)\n"
         "\n"
         "--kl_discount : KL divergence discount (default: 0)\n"
         "              : Loss = likelihood_loss + beta * KL_loss\n"
         "              : where beta = exp(- ${discount} * epoch)\n"
+        "--kl_max      : max KL divergence penalty (default: 1)\n"
         "--kl_min      : min KL divergence penalty (default: 1)\n"
         "\n";
 
-    const char *const short_opts = "M:I:O:b:K:l:h?";
+    const char *const short_opts = "M:I:O:r:c:a:b:K:l:h?";
 
     const option long_opts[] = {
         { "mtx", required_argument, nullptr, 'M' },         //
         { "idx", required_argument, nullptr, 'I' },         //
         { "out", required_argument, nullptr, 'O' },         //
         { "output", required_argument, nullptr, 'O' },      //
+        { "row", required_argument, nullptr, 'r' },         //
+        { "col", required_argument, nullptr, 'c' },         //
+        { "column", required_argument, nullptr, 'c' },      //
+        { "annot", required_argument, nullptr, 'a' },       //
+        { "annotation", required_argument, nullptr, 'a' },  //
         { "batch_size", required_argument, nullptr, 'b' },  //
         { "batch", required_argument, nullptr, 'b' },       //
         { "kl_discount", required_argument, nullptr, 'K' }, //
+        { "kl_max", required_argument, nullptr, 'l' },      //
         { "kl_min", required_argument, nullptr, 'l' },      //
         { "help", no_argument, nullptr, 'h' },              //
         { nullptr, no_argument, nullptr, 0 }
@@ -110,6 +130,18 @@ parse_mmvae_options(const int argc,
 
         case 'O':
             options.out = std::string(optarg);
+            break;
+
+        case 'r':
+            options.row = std::string(optarg);
+            break;
+
+        case 'c':
+            options.col = std::string(optarg);
+            break;
+
+        case 'a':
+            options.annot = std::string(optarg);
             break;
 
         case 'b':
