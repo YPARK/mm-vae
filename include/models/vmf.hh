@@ -383,8 +383,12 @@ vmf_vae_loss(torch::Tensor x, vmf_vae_out_t yhat, float kl_weight)
 {
     const float eps = 1e-2 / static_cast<float>(x.size(1));
     namespace F = torch::nn::functional;
+<<<<<<< HEAD
     auto yobs =
         F::normalize(x.log1p() + eps, F::NormalizeFuncOptions().p(2).dim(1));
+=======
+    auto yobs = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
+>>>>>>> 500fdf4d360fcd5afac8025c945fd8f3fd9d2d63
 
     const float n = yobs.size(0);
     const float dd = yobs.size(1);
