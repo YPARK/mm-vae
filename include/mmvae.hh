@@ -33,8 +33,8 @@ struct mmvae_options_t {
     {
         // default options
         batch_size = 100;
-        kl_discount = 0.;
-        kl_min = 1.;
+        kl_discount = .1;
+        kl_min = 1e-2;
         kl_max = 1.;
     }
 

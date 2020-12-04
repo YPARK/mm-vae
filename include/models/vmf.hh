@@ -57,8 +57,8 @@ struct vmf_options_t {
         // default options
         do_relu = false;
         latent = 2;
-        kappa_min = .5;
-        kappa_max = 500.;
+        kappa_min = .1;
+        kappa_max = 10.;
     }
 
     std::vector<int64_t> encoding_layers;
@@ -79,8 +79,8 @@ parse_vmf_options(const int argc, const char *_argv[], vmf_options_t &options)
         "--encoding  : dims for encoding layers (e.g., 10,10)\n"
         "--decoding  : dims for decoding layers (e.g., 10,10)\n"
         "--latent    : latent z's dim\n"
-        "--kappa_min : max of the concentration parameter (default: .5)\n"
-        "--kappa_max : min of the concentration parameter (default: 500)\n"
+        "--kappa_min : max of the concentration parameter (default: .1)\n"
+        "--kappa_max : min of the concentration parameter (default: 10)\n"
         "--no_relu   : remove ReLU between layers (default)\n"
         "--relu      : add ReLU between layers\n"
         "\n";
@@ -291,7 +291,7 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim d_,
     , do_relu(do_relu_)
     , x_mean(torch::zeros({ 1, x_dim }))
     , ln_x_sd(torch::ones({ 1, x_dim }))
-    , ln_kappa(torch::ones({ 1 }) * (-z_dim))
+    , ln_kappa(torch::ones({ 1 }) * std::log(kap_min))
 {
     register_parameter("x_mean", x_mean);
     register_parameter("ln_x_sd", ln_x_sd);
@@ -308,7 +308,7 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim d_,
 
     for (int l = 0; l < z_enc_dim_vec.size(); ++l) {
         int64_t d_next = z_enc_dim_vec[l];
-        z_enc->push_back(torch::nn::Linear(d_prev, d_next));
+        z_enc->push_back(mmvae::Angular(d_prev, d_next));
         if (do_relu)
             z_enc->push_back(torch::nn::ReLU(d_next));
         d_prev = d_next;
@@ -316,7 +316,7 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim d_,
 
     // Add final one mapping to the latent
     if (z_enc_dim_vec.size() < 1) {
-        z_enc->push_back(torch::nn::Linear(d_prev, z_dim));
+        z_enc->push_back(mmvae::Angular(d_prev, z_dim));
         if (do_relu)
             z_enc->push_back(torch::nn::ReLU(z_dim));
 
@@ -383,12 +383,8 @@ vmf_vae_loss(torch::Tensor x, vmf_vae_out_t yhat, float kl_weight)
 {
     const float eps = 1e-2 / static_cast<float>(x.size(1));
     namespace F = torch::nn::functional;
-<<<<<<< HEAD
     auto yobs =
         F::normalize(x.log1p() + eps, F::NormalizeFuncOptions().p(2).dim(1));
-=======
-    auto yobs = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
->>>>>>> 500fdf4d360fcd5afac8025c945fd8f3fd9d2d63
 
     const float n = yobs.size(0);
     const float dd = yobs.size(1);
@@ -400,9 +396,9 @@ vmf_vae_loss(torch::Tensor x, vmf_vae_out_t yhat, float kl_weight)
 
     auto llik = torch::sum(yobs * recon, 1) * kappa;
     llik += df * torch::log(kappa) - lbessel(kappa, df);
-    // llik -= 0.5 * dd * fasterlog(2. * M_PI);
+    llik -= 0.5 * dd * fasterlog(2. * M_PI);
 
-    return llik.sum() / n + kl / n * kl_weight;
+    return kl / n * kl_weight - llik.sum() / n;
 }
 
 //////////////////////
