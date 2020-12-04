@@ -241,8 +241,7 @@ private:
 std::pair<torch::Tensor, torch::Tensor>
 vmf_vae_tImpl::encode(torch::Tensor x)
 {
-    const float eps = 1e-2;
-
+    const float eps = 1e-2 / static_cast<float>(x.size(1));
     namespace F = torch::nn::functional;
     auto xn = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
     auto xn_std =
@@ -382,8 +381,10 @@ kl_loss_normal(torch::Tensor _mean, torch::Tensor _lnvar)
 torch::Tensor
 vmf_vae_loss(torch::Tensor x, vmf_vae_out_t yhat, float kl_weight)
 {
+    const float eps = 1e-2 / static_cast<float>(x.size(1));
     namespace F = torch::nn::functional;
-    auto yobs = F::normalize(x, F::NormalizeFuncOptions().p(2).dim(1));
+    auto yobs =
+        F::normalize(x.log1p() + eps, F::NormalizeFuncOptions().p(2).dim(1));
 
     const float n = yobs.size(0);
     const float dd = yobs.size(1);
