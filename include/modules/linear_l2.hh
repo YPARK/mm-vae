@@ -7,14 +7,14 @@
 #include <torch/nn/functional/linear.h> //
 #endif                                  // End of torch
 
-#ifndef MMVAE_MODULE_ANGULAR_HH_
-#define MMVAE_MODULE_ANGULAR_HH_
+#ifndef MMVAE_MODULE_LINEARL2_HH_
+#define MMVAE_MODULE_LINEARL2_HH_
 
 namespace mmvae {
 
-struct AngularImpl : public torch::nn::Module {
+struct LinearL2Impl : public torch::nn::Module {
 
-    explicit AngularImpl(int64_t in_features, int64_t out_features);
+    explicit LinearL2Impl(int64_t in_features, int64_t out_features);
 
     void reset();
 
@@ -29,27 +29,25 @@ struct AngularImpl : public torch::nn::Module {
 
     const int64_t d_in;
     const int64_t d_out;
+    const float penalty;
 };
 
 torch::Tensor
-AngularImpl::forward(const torch::Tensor &input)
+LinearL2Impl::forward(const torch::Tensor &input)
 {
-    const float eps = 1e-4;
-    namespace F = torch::nn::functional;
-    auto ww = F::normalize(F::relu(weight) + eps,
-                           F::NormalizeFuncOptions().p(2).dim(1));
-    return F::linear(input, ww, bias);
+    return F::linear(input, weight, bias);
 }
 
-AngularImpl::AngularImpl(int64_t in_features, int64_t out_features)
+LinearL2Impl::LinearL2Impl(int64_t in_features, int64_t out_features)
     : d_in(in_features)
     , d_out(out_features)
+    , penalty(1e-2)
 {
     reset();
 }
 
 void
-AngularImpl::reset()
+LinearL2Impl::reset()
 {
     weight = register_parameter("weight", torch::empty({ d_out, d_in }));
     bias = register_parameter("bias", {}, false);
@@ -57,7 +55,7 @@ AngularImpl::reset()
 }
 
 void
-AngularImpl::reset_parameters()
+LinearL2Impl::reset_parameters()
 {
     torch::nn::init::kaiming_uniform_(weight, std::sqrt(5));
     if (bias.defined()) {
@@ -69,6 +67,6 @@ AngularImpl::reset_parameters()
     }
 }
 
-TORCH_MODULE(Angular);
+TORCH_MODULE(LinearL2);
 }
 #endif

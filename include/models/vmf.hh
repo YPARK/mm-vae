@@ -258,7 +258,7 @@ torch::Tensor
 vmf_vae_tImpl::decode(torch::Tensor z)
 {
     namespace F = torch::nn::functional;
-    auto h = z_dec->forward(z);
+    auto h = torch::exp(z_dec->forward(z));
     return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
 }
 
@@ -383,8 +383,8 @@ vmf_vae_loss(torch::Tensor x, vmf_vae_out_t yhat, float kl_weight)
 {
     const float eps = 1e-2 / static_cast<float>(x.size(1));
     namespace F = torch::nn::functional;
-    auto yobs =
-        F::normalize(x.log1p() + eps, F::NormalizeFuncOptions().p(2).dim(1));
+    auto yobs = F::normalize(F::relu(x).log1p() + eps,
+                             F::NormalizeFuncOptions().p(2).dim(1));
 
     const float n = yobs.size(0);
     const float dd = yobs.size(1);
@@ -416,152 +416,82 @@ vmf_vae_tImpl::_copy_dim_vec(const VEC &src, std::vector<int64_t> &dst)
                    [](const auto x) { return x.val; });
 }
 
-TORCH_MODULE(vmf_vae_t); // expose vmf_vae_t ////////////////
+struct vmf_vae_recorder_t {
 
-//////////////////////////////
-// von Mises Fisher mixture //
-//////////////////////////////
+    using Mat =
+        Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
-struct vmf_mixture_tImpl : torch::nn::Module {
-
-    vmf_mixture_tImpl(torch::Tensor _label,
-                      const kappa_min _kmin,
-                      const kappa_max _kmax);
-
-    std::tuple<torch::Tensor, torch::Tensor> forward(torch::Tensor x);
-
-    const torch::Tensor L; // D x K
-
-    const int64_t D;
-    const int64_t K;
-
-    torch::Tensor take_estep(torch::Tensor x);
-
-    float dd;
-
-    torch::Tensor ln_mu;       // D x K parameter
-    torch::Tensor mu;          // D x K parameter
-    torch::Tensor logit_kappa; // 1 x 1 parmeter
-    torch::Tensor kappa;       // 1 x 1 parmeter
-    torch::Tensor filter;      // 1 x D
-
-    const float kap_min;
-    const float kap_max;
-
-    void resolve_mu();
-    void resolve_kappa();
-
-    torch::Tensor normalize_x(torch::Tensor x);
-};
-
-vmf_mixture_tImpl::vmf_mixture_tImpl(torch::Tensor _label,
-                                     const kappa_min _kmin = kappa_min { 1. },
-                                     const kappa_max _kmax = kappa_max { 100. })
-    : L(_label)
-    , D(L.size(0))
-    , K(L.size(1))
-    , ln_mu(torch::zeros({ D, K }))
-    , mu(torch::zeros({ D, K }))
-    , logit_kappa(torch::ones({ 1 }) * (-fasterlog(K)))
-    , kappa(torch::zeros({ 1 }))
-    , filter(torch::zeros({ 1, D }))
-    , kap_min(_kmin.val)
-    , kap_max(_kmax.val)
-{
-    register_parameter("ln_mu", ln_mu);
-    register_parameter("logit_kappa", logit_kappa);
-    register_parameter("mu", mu);
-    register_parameter("kappa", kappa);
-
-    // Ask how many features are effectively non-zero?
-    filter =
-        torch::mm(torch::ones({ 1, K }), L.transpose(0, 1)).gt(0.).type_as(L);
-
-    dd = filter.sum().item<float>();
-
-    TLOG("Dimensionality in vMF mixture: " << dd);
-
-    resolve_mu();
-    resolve_kappa();
-}
-
-std::tuple<torch::Tensor, torch::Tensor>
-vmf_mixture_tImpl::forward(torch::Tensor x)
-{
-    namespace F = torch::nn::functional;
-
-    auto z = take_estep(x).detach();
-    auto xn = normalize_x(x);
-
-    const float df = std::max(0.5 * dd - 1., 0.);
-
-    auto ln_q_ = torch::mm(xn, mu) * kappa;
-    auto llik = ln_q_ + df * torch::log(kappa) - lbessel(kappa, df);
-    llik -= 0.5 * dd * fasterlog(2. * M_PI);
-
-    return std::make_tuple(torch::sum(-llik * z, 1), ln_q_);
-}
-
-//////////////////////////////////////////////////////////
-// Make sure that the data can reside on angular domain //
-//////////////////////////////////////////////////////////
-
-/// @param x
-torch::Tensor
-vmf_mixture_tImpl::normalize_x(torch::Tensor x)
-{
-    const float eps = 1e-4;
-    namespace F = torch::nn::functional;
-    auto opt_ = F::NormalizeFuncOptions().p(2).dim(1);
-
-    return F::normalize((x.log1p() + eps).mul(filter), opt_);
-}
-
-void
-vmf_mixture_tImpl::resolve_mu()
-{
-    const float eps = 1e-4;
-    namespace F = torch::nn::functional;
-    mu = F::normalize(ln_mu.exp().mul(L) + eps,
-                      F::NormalizeFuncOptions().p(2).dim(0));
-}
-
-void
-vmf_mixture_tImpl::resolve_kappa()
-{
-    const float delt = kap_max - kap_min;
-    kappa = delt * torch::sigmoid(logit_kappa) + kap_min;
-}
-
-torch::Tensor
-vmf_mixture_tImpl::take_estep(torch::Tensor x)
-{
-    resolve_mu();
-    resolve_kappa();
-    namespace F = torch::nn::functional;
-    auto xn = normalize_x(x);
-    auto logits = torch::log_softmax(torch::mm(xn, mu) * kappa, 1);
-
-    if (!is_training()) {
-        return logits.exp();
+    explicit vmf_vae_recorder_t(const std::string _hdr,
+                                const int64_t _max_epoch)
+        : header(_hdr)
+        , epoch(0)
+        , max_epoch(_max_epoch)
+    {
     }
 
-    return F::gumbel_softmax(logits,
-                             F::GumbelSoftmaxFuncOptions().dim(1).hard(true));
-}
+    template <typename MODEL, typename DB, typename BAT>
+    void update_on_epoch(MODEL &model, DB &db, BAT &batches)
+    {
+        write(zeropad(++epoch, max_epoch));
+    }
 
-/// KL-divergence loss from the uniform prior
-/// Eq[ln q - ln p]
-/// @param ln_q_y variational log probability
-torch::Tensor
-kl_loss_uniform(torch::Tensor ln_q_)
-{
-    auto ln_z = torch::log_softmax(ln_q_, 1);
-    const float K = ln_z.size(1);
-    return torch::sum(ln_z.exp() * (ln_z + fasterlog(K)), 1);
-}
+    template <typename MODEL, typename DB, typename BAT>
+    void update_on_batch(MODEL &model, DB &db, BAT &batches)
+    {
+        model->train(false); // freeze the model
 
-TORCH_MODULE(vmf_mixture_t); // expose vmf_mixture_t
+        const int64_t ntot = db.ntot();
+
+        ///////////////////////
+        // output mu encoder //
+        ///////////////////////
+
+        auto mu_out = model->encode(db.torch_tensor().to(torch::kCPU));
+        torch::Tensor _mean = std::get<0>(mu_out);
+        torch::Tensor _lnvar = std::get<1>(mu_out);
+
+        if (mean_out.rows() < ntot || mean_out.cols() < _mean.size(1)) {
+            mean_out.resize(ntot, _mean.size(1));
+            mean_out.setZero();
+        }
+
+        if (lnvar_out.rows() < ntot || lnvar_out.cols() < _lnvar.size(1)) {
+            lnvar_out.resize(ntot, _lnvar.size(1));
+            lnvar_out.setZero();
+        }
+
+        Eigen::Map<Mat> _mean_mat(_mean.data_ptr<float>(),
+                                  _mean.size(0),
+                                  _mean.size(1));
+        Eigen::Map<Mat> _lnvar_mat(_lnvar.data_ptr<float>(),
+                                   _lnvar.size(0),
+                                   _lnvar.size(1));
+
+        for (int64_t j = 0; j < batches.size(); ++j) {
+            if (batches[j] < ntot) {
+                mean_out.row(batches[j]) = _mean_mat.row(j);
+                lnvar_out.row(batches[j]) = _lnvar_mat.row(j);
+            }
+        }
+
+        model->train(true); // release
+    }
+
+    void write(const std::string tag)
+    {
+        const std::string _hdr_tag =
+            tag.size() > 0 ? (header + "_" + tag) : header;
+        write_data_file(_hdr_tag + ".latent_mean.gz", mean_out);
+        write_data_file(_hdr_tag + ".latent_lnvar.gz", lnvar_out);
+    }
+
+    const std::string header; // file header
+    int64_t epoch;
+    const int64_t max_epoch;
+    Mat mean_out, lnvar_out;
+};
+
+TORCH_MODULE(vmf_vae_t); // expose vmf_vae_t ////////////////
 
 }} // namespace
 #endif

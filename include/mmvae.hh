@@ -72,7 +72,7 @@ parse_mmvae_options(const int argc,
         "              : Loss = likelihood_loss + beta * KL_loss\n"
         "              : where beta = exp(- ${discount} * epoch)\n"
         "--kl_max      : max KL divergence penalty (default: 1)\n"
-        "--kl_min      : min KL divergence penalty (default: 1)\n"
+        "--kl_min      : min KL divergence penalty (default: 1e-2)\n"
         "\n";
 
     const char *const short_opts = "M:I:O:r:c:a:b:K:l:h?";
@@ -180,6 +180,78 @@ parse_mmvae_options(const int argc,
     }
 
     return EXIT_SUCCESS;
+}
+
+struct annotation_t {
+
+    using Str = std::string;
+
+    struct FEAT {
+        Str s;
+    };
+
+    struct ANNOT {
+        Str s;
+    };
+
+    explicit annotation_t(const ANNOT annot, const FEAT feat);
+
+    torch::Tensor operator()();
+
+    const std::string annot_file;
+    const std::string feature_file;
+
+private:
+    std::vector<std::tuple<std::string, std::string>> annot_;
+    std::unordered_map<std::string, int64_t> feature2id;
+    std::vector<std::string> features;
+    std::unordered_map<std::string, int64_t> label_pos;
+    std::vector<std::string> labels;
+
+    int64_t D, K;
+};
+
+annotation_t::annotation_t(const annotation_t::ANNOT annot,
+                           const annotation_t::FEAT feat)
+    : annot_file(annot.s)
+    , feature_file(feat.s)
+{
+
+    CHK(read_pair_file(annot_file, annot_));
+    CHK(read_vector_file(feature_file, features));
+
+    feature2id = make_position_dict<std::string, int64_t>(features);
+
+    {
+        int64_t j = 0;
+        for (auto pp : annot_) {
+            if (feature2id.count(std::get<0>(pp)) > 0) {
+                if (label_pos.count(std::get<1>(pp)) == 0) {
+                    label_pos[std::get<1>(pp)] = j++;
+                    labels.push_back(std::get<1>(pp));
+                }
+            }
+        }
+    }
+
+    D = feature2id.size();
+    K = std::max(label_pos.size(), (std::size_t)1);
+}
+
+torch::Tensor
+annotation_t::operator()()
+{
+    torch::Tensor L(torch::zeros({ D, K }));
+
+    for (auto pp : annot_) {
+        if (feature2id.count(std::get<0>(pp)) > 0) {
+            const int64_t k = label_pos[std::get<1>(pp)];
+            const int64_t j = feature2id[std::get<0>(pp)];
+            L[j][k] = 1.;
+        }
+    }
+
+    return L;
 }
 
 #endif

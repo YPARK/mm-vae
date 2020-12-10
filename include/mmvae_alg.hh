@@ -188,6 +188,8 @@ visit_vae_model(MODEL_PTR model, VISITOR &visitor, DATA_BLOCK &data_block)
         data_block.clear();
     }
 
+    visitor.update_on_epoch(model, data_block, batch);
+
     TLOG("Done visit");
 }
 
@@ -217,9 +219,12 @@ train_vae_model(MODEL_PTR model,
                          << "Number of batches = " << nbatch);
 
     using optim_t = torch::optim::Adam;
-    optim_t adam(model->parameters(), torch::optim::AdamOptions(opt.lr));
+    optim_t adam(model->parameters(),
+                 torch::optim::AdamOptions(opt.lr).weight_decay(1e-4));
     model->to(opt.device);
     model->pretty_print(std::cerr);
+
+    const float grad_clip = 1e-2;
 
     std::random_device rd;
     std::mt19937 rng(rd());
@@ -280,6 +285,8 @@ train_vae_model(MODEL_PTR model,
 
                 adam.zero_grad();
                 loss.backward();
+                torch::nn::utils::clip_grad_norm_(model->parameters(),
+                                                  grad_clip);
                 adam.step();
             }
 

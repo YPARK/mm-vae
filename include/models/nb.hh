@@ -14,10 +14,11 @@
 
 namespace mmvae { namespace nb {
 
-const char *_model_desc = "Likelihood:\n"
-                          "     Γ(x + ν)        μ           ν   \n"
-                          "x ~ ------------ ( ----- )^x ( ----- )^ν\n"
-                          "    Γ(x + 1)Γ(ν)   μ + ν       μ + ν\n"
+const char *_model_desc = "[Likelihood]\n"
+                          "\n"
+                          "        Γ(x + ν)        μ           ν   \n"
+                          "f(x) = ------------ ( ----- )^x ( ----- )^ν\n"
+                          "       Γ(x + 1)Γ(ν)   μ + ν       μ + ν\n"
                           "\n"
                           "μ = exp(decoding(z_μ) + bias_μ)\n"
                           "ν = exp(decoding(z_ν) + bias_ν)\n"
@@ -77,8 +78,6 @@ parse_nbvae_options(const int argc,
         "\n"
         "--mean_encoding     : dims for mean encoding layers (e.g., 10,10)\n"
         "--mean_decoding     : dims for mean decoding layers (e.g., 10,10)\n"
-        "                    : If the final dim does not match with data\n"
-        "                    : it will create an additional layer.\n"
         "\n"
         "--mean_latent       : latent z's dim for the mean\n"
         "\n"
@@ -100,12 +99,10 @@ parse_nbvae_options(const int argc,
         { "mean-latent", required_argument, nullptr, 'L' },             //
         { "overdisp_encoding", required_argument, nullptr, 'e' },       //
         { "overdisp-encoding", required_argument, nullptr, 'e' },       //
-        { "overdisp_decoding", required_argument, nullptr, 'e' },       //
-        { "overdisp-decoding", required_argument, nullptr, 'e' },       //
         { "overdispersion_encoding", required_argument, nullptr, 'e' }, //
         { "overdispersion-encoding", required_argument, nullptr, 'e' }, //
-        { "overdispersion_decoding", required_argument, nullptr, 'e' }, //
-        { "overdispersion-decoding", required_argument, nullptr, 'e' }, //
+        { "overdispersion_latent", required_argument, nullptr, 'l' },   //
+        { "overdispersion-latent", required_argument, nullptr, 'l' },   //
         { "relu", no_argument, nullptr, 'R' },                          //
         { "no_relu", no_argument, nullptr, 'r' },                       //
         { "no-relu", no_argument, nullptr, 'r' },                       //
@@ -204,6 +201,7 @@ struct nbvae_out_t {
 
     T recon_mu;
     T recon_nu;
+    T recon_depth;
     T mu_mean;
     T mu_lnvar;
     T nu_mean;
@@ -275,6 +273,8 @@ private:
 
     std::vector<int64_t> mu_eh_dim_vec;
     std::vector<int64_t> mu_dh_dim_vec;
+
+    torch::nn::Linear depth { nullptr };
 };
 
 /// loss function for NB-VAE
@@ -323,6 +323,7 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     for (int l = 0; l < mu_eh_dim_vec.size(); ++l) {
         int64_t d_next = mu_eh_dim_vec[l];
         mu_enc->push_back(torch::nn::Linear(d_prev, d_next));
+        // mu_enc->push_back(mmvae::Angular(d_prev, d_next));
         if (do_relu)
             mu_enc->push_back(torch::nn::ReLU(d_next));
         d_prev = d_next;
@@ -331,6 +332,7 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     // Add final one mapping to the latent
     if (mu_eh_dim_vec.size() < 1) {
         mu_enc->push_back(torch::nn::Linear(d_prev, mu_r_dim));
+        // mu_enc->push_back(mmvae::Angular(d_prev, mu_r_dim));
         if (do_relu)
             mu_enc->push_back(torch::nn::ReLU(mu_r_dim));
 
@@ -378,6 +380,12 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
                                     torch::nn::Linear(nu_h_dim, nu_r_dim));
     nu_dec =
         register_module("nu: decoding", torch::nn::Linear(nu_r_dim, x_dim));
+
+    //////////////////////
+    // sequencing depth //
+    //////////////////////
+
+    depth = register_module("depth", torch::nn::Linear(x_dim, 1));
 }
 
 std::pair<torch::Tensor, torch::Tensor>
@@ -400,7 +408,7 @@ torch::Tensor
 nbvae_tImpl::decode_mu(torch::Tensor z)
 {
     auto h = mu_dec->forward(z);
-    return torch::exp(h + mu_bias);
+    return torch::exp(torch::log_softmax(h, 1) + mu_bias);
 }
 
 std::pair<torch::Tensor, torch::Tensor>
@@ -442,7 +450,7 @@ nbvae_tImpl::forward(torch::Tensor x)
     auto mu_enc_out = encode_mu(x);
     auto mu_mean = mu_enc_out.first;
     auto mu_lnvar = mu_enc_out.second;
-    auto _mu = decode_mu(reparameterize(mu_mean, mu_lnvar));
+    auto mu_ = decode_mu(reparameterize(mu_mean, mu_lnvar));
 
     /////////////////////
     // over-dispersion //
@@ -451,9 +459,15 @@ nbvae_tImpl::forward(torch::Tensor x)
     auto nu_enc_out = encode_nu(x);
     auto nu_mean = nu_enc_out.first;
     auto nu_lnvar = nu_enc_out.second;
-    auto _nu = decode_nu(reparameterize(nu_mean, nu_lnvar));
+    auto nu_ = decode_nu(reparameterize(nu_mean, nu_lnvar));
 
-    return { _mu, _nu, mu_mean, mu_lnvar, nu_mean, nu_lnvar };
+    ///////////
+    // depth //
+    ///////////
+
+    auto d_ = torch::softplus(depth->forward(x));
+
+    return { mu_, nu_, d_, mu_mean, mu_lnvar, nu_mean, nu_lnvar };
 }
 
 /// Negative Binomial Loss
@@ -464,18 +478,16 @@ nllik_loss(torch::Tensor x, nbvae_out_t y)
 
     namespace F = torch::nn::functional;
 
-    auto xn = F::normalize(x, F::NormalizeFuncOptions().p(2).dim(1)).mul(1e4);
-
     auto nu = y.recon_nu + eps;
-    auto mu = y.recon_mu + eps;
+    auto mu = y.recon_mu * y.recon_depth + eps;
 
     // log-gamma ratio
-    auto lg = torch::lgamma(nu) + torch::lgamma(xn + 1.);
-    lg -= torch::lgamma(nu + xn);
+    auto lg = torch::lgamma(nu) + torch::lgamma(x + 1.);
+    lg -= torch::lgamma(nu + x);
 
     // logit-like llik
     auto denom = torch::log(mu + nu);
-    auto pr = xn.mul(denom - torch::log(mu));
+    auto pr = x.mul(denom - torch::log(mu));
     pr += nu.mul(denom - torch::log(nu));
 
     return torch::sum(lg + pr);
@@ -512,6 +524,84 @@ nbvae_tImpl::_copy_dim_vec(const VEC &src, std::vector<int64_t> &dst)
                    std::back_inserter(dst),
                    [](const auto x) { return x.val; });
 }
+
+//////////////////
+// helper class //
+//////////////////
+
+struct nbvae_recorder_t {
+
+    using Mat =
+        Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
+    explicit nbvae_recorder_t(const std::string _hdr, const int64_t _max_epoch)
+        : header(_hdr)
+        , epoch(0)
+        , max_epoch(_max_epoch)
+    {
+    }
+
+    template <typename MODEL, typename DB, typename BAT>
+    void update_on_epoch(MODEL &model, DB &db, BAT &batches)
+    {
+        write(zeropad(++epoch, max_epoch));
+    }
+
+    template <typename MODEL, typename DB, typename BAT>
+    void update_on_batch(MODEL &model, DB &db, BAT &batches)
+    {
+        model->train(false); // freeze the model
+
+        const int64_t ntot = db.ntot();
+
+        ///////////////////////
+        // output mu encoder //
+        ///////////////////////
+
+        auto mu_out = model->encode_mu(db.torch_tensor().to(torch::kCPU));
+        torch::Tensor _mean = std::get<0>(mu_out);
+        torch::Tensor _lnvar = std::get<1>(mu_out);
+
+        if (mean_out.rows() < ntot || mean_out.cols() < _mean.size(1)) {
+            mean_out.resize(ntot, _mean.size(1));
+            mean_out.setZero();
+        }
+
+        if (lnvar_out.rows() < ntot || lnvar_out.cols() < _lnvar.size(1)) {
+            lnvar_out.resize(ntot, _lnvar.size(1));
+            lnvar_out.setZero();
+        }
+
+        Eigen::Map<Mat> _mean_mat(_mean.data_ptr<float>(),
+                                  _mean.size(0),
+                                  _mean.size(1));
+        Eigen::Map<Mat> _lnvar_mat(_lnvar.data_ptr<float>(),
+                                   _lnvar.size(0),
+                                   _lnvar.size(1));
+
+        for (int64_t j = 0; j < batches.size(); ++j) {
+            if (batches[j] < ntot) {
+                mean_out.row(batches[j]) = _mean_mat.row(j);
+                lnvar_out.row(batches[j]) = _lnvar_mat.row(j);
+            }
+        }
+
+        model->train(true); // release
+    }
+
+    void write(const std::string tag)
+    {
+        const std::string _hdr_tag =
+            tag.size() > 0 ? (header + "_" + tag) : header;
+        write_data_file(_hdr_tag + ".mu_mean.gz", mean_out);
+        write_data_file(_hdr_tag + ".mu_lnvar.gz", lnvar_out);
+    }
+
+    const std::string header; // file header
+    int64_t epoch;
+    const int64_t max_epoch;
+    Mat mean_out, lnvar_out;
+};
 
 TORCH_MODULE(nbvae_t); // expose nbvae_t
 }}                     // namespace

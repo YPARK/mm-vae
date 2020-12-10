@@ -53,28 +53,21 @@ target_include_directories(bgzslib PUBLIC
 # Executable #
 ##############
 
-add_executable(nb_vae
-  src/nb_vae_main.cc
-  include/mmvae.hh
-  include/mmvae_io.hh
-  include/models/nb.hh
-  )
+file(GLOB main_files "src/*_main.cc")
 
-target_include_directories(nb_vae PUBLIC include include/models include/modules)
-target_link_libraries(nb_vae "${TORCH_LIBRARIES}")
-target_link_libraries(nb_vae ZLIB::ZLIB gzslib bgzslib bgzf)
-set_property(TARGET nb_vae PROPERTY CXX_STANDARD 14)
-
-add_executable(vmf_vae
-  src/vmf_vae_main.cc
-  include/mmvae.hh
-  include/operators.hh
-  include/mmvae_io.hh
-  include/modules/angular.hh
-  )
-
-target_include_directories(vmf_vae PUBLIC include include/models include/modules)
-target_link_libraries(vmf_vae "${TORCH_LIBRARIES}")
-target_link_libraries(vmf_vae ZLIB::ZLIB gzslib bgzslib bgzf)
-set_property(TARGET vmf_vae PROPERTY CXX_STANDARD 14)
-
+foreach(file ${main_files})
+  get_filename_component(fname ${file} NAME "src/")
+  string(REPLACE "_main.cc" "" name ${fname})
+  string(REPLACE "_vae" "" model ${name})
+  add_executable(${name}
+    ${file}
+    include/mmvae.hh
+    include/mmvae_io.hh
+    include/mmvae_alg.hh
+    include/models/${model}.hh
+    include/modules/angular.hh)
+  target_include_directories(${name} PUBLIC include include/models include/modules)
+  target_link_libraries(${name} "${TORCH_LIBRARIES}")
+  target_link_libraries(${name} ZLIB::ZLIB gzslib bgzslib bgzf)
+  set_property(TARGET ${name} PROPERTY CXX_STANDARD 14)
+endforeach(file ${main_files})
