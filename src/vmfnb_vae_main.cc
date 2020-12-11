@@ -71,6 +71,10 @@ main(const int argc, const char *argv[])
     vmfnb_recorder_t recorder(main_opt.out, train_opt.max_epoch);
 
     composite_loss_t loss;
+    loss.time_discount = main_opt.kl_discount;
+    loss.max_rate = main_opt.kl_max;
+    loss.min_rate = main_opt.kl_min;
+
     train_vae_model(model, recorder, data_block, train_opt, loss);
 
     TLOG("Done");

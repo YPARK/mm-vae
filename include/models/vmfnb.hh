@@ -731,8 +731,6 @@ struct composite_loss_t {
         time_discount = 0.1;
         min_rate = 0.01;
         max_rate = 1.;
-        max_temp = 50.;
-        min_temp = .05;
     }
 
     /// @param x observed data
@@ -746,6 +744,7 @@ struct composite_loss_t {
         using namespace mmvae::vmfnb;
         float t = static_cast<float>(epoch);
         float rate = max_rate * std::exp(-time_discount * t);
+        rate = std::max(min_rate, rate);
 
         auto kl_nb = kl_loss_gaussian(y.nb_mu_mean, y.nb_mu_lnvar) +
             kl_loss_gaussian(y.nb_nu_mean, y.nb_nu_lnvar);
@@ -756,8 +755,6 @@ struct composite_loss_t {
     float time_discount;
     float max_rate;
     float min_rate;
-    float max_temp;
-    float min_temp;
 };
 
 TORCH_MODULE(vmfnb_vae_t); // expose vmfnb_vae_t
