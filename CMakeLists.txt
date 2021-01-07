@@ -61,9 +61,12 @@ foreach(file ${main_files})
   string(REPLACE "_vae" "" model ${name})
   add_executable(${name}
     ${file}
+    include/mmutil_index.hh
+    include/mmutil_bgzf_util.hh
     include/mmvae.hh
     include/mmvae_io.hh
     include/mmvae_alg.hh
+    include/io.hh
     include/models/${model}.hh
     include/modules/angular.hh)
   target_include_directories(${name} PUBLIC include include/models include/modules)

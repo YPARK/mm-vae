@@ -6,6 +6,7 @@
 #include "gzstream.hh"
 
 #include "io_visitor.hh"
+#include "io_alg.hh"
 #include "eigen_util.hh"
 #include "std_util.hh"
 #include "math.hh"
@@ -45,6 +46,9 @@ struct mmvae_options_t {
     std::string col;
     std::string annot;
 
+    std::string covar_mtx;
+    std::string covar_idx;
+
     int64_t batch_size;
     float kl_discount;
     float kl_min;
@@ -61,11 +65,13 @@ parse_mmvae_options(const int argc,
         "[options]\n"
         "\n"
         "--mtx         : a matrix market mtx file\n"
-        "--idx         : a matrix market mtx index file (default: ${mtx}.index)\n"
+        "--idx         : an index file for the mtx (default: ${mtx}.index)\n"
         "--row         : the rows (line = one string)\n"
         "--col         : the columns (line = one string)\n"
         "--annot       : the list of column annotations (line = ${col} <space> ${k})\n"
         "--out         : output file header\n"
+        "--covar       : a separate matrix market mtx for other covariates\n"
+        "--covar_idx   : an index file for the covar mtx (default: ${covar}.index)\n"
         "--batch_size  : #samples in each batch (default: 100)\n"
         "\n"
         "--kl_discount : KL divergence discount (default: 0)\n"
@@ -75,13 +81,17 @@ parse_mmvae_options(const int argc,
         "--kl_min      : min KL divergence penalty (default: 1e-2)\n"
         "\n";
 
-    const char *const short_opts = "M:I:O:r:c:a:b:K:l:h?";
+    const char *const short_opts = "M:I:O:V:J:r:c:a:b:K:L:l:h?";
 
     const option long_opts[] = {
         { "mtx", required_argument, nullptr, 'M' },         //
         { "idx", required_argument, nullptr, 'I' },         //
         { "out", required_argument, nullptr, 'O' },         //
         { "output", required_argument, nullptr, 'O' },      //
+        { "cov", required_argument, nullptr, 'V' },         //
+        { "covar", required_argument, nullptr, 'V' },       //
+        { "cov_idx", required_argument, nullptr, 'J' },     //
+        { "covar_idx", required_argument, nullptr, 'J' },   //
         { "row", required_argument, nullptr, 'r' },         //
         { "col", required_argument, nullptr, 'c' },         //
         { "column", required_argument, nullptr, 'c' },      //
@@ -90,7 +100,7 @@ parse_mmvae_options(const int argc,
         { "batch_size", required_argument, nullptr, 'b' },  //
         { "batch", required_argument, nullptr, 'b' },       //
         { "kl_discount", required_argument, nullptr, 'K' }, //
-        { "kl_max", required_argument, nullptr, 'l' },      //
+        { "kl_max", required_argument, nullptr, 'L' },      //
         { "kl_min", required_argument, nullptr, 'l' },      //
         { "help", no_argument, nullptr, 'h' },              //
         { nullptr, no_argument, nullptr, 0 }
@@ -128,6 +138,14 @@ parse_mmvae_options(const int argc,
             options.idx = std::string(optarg);
             break;
 
+        case 'V':
+            options.covar_mtx = std::string(optarg);
+            break;
+
+        case 'J':
+            options.covar_idx = std::string(optarg);
+            break;
+
         case 'O':
             options.out = std::string(optarg);
             break;
@@ -156,6 +174,10 @@ parse_mmvae_options(const int argc,
             options.kl_min = std::stof(optarg);
             break;
 
+        case 'L':
+            options.kl_max = std::stof(optarg);
+            break;
+
         case 'h': // -h or --help
             std::cerr << _usage << std::endl;
             for (std::size_t i = 0; i < argv_copy.size(); i++)
@@ -177,6 +199,10 @@ parse_mmvae_options(const int argc,
 
     if (options.idx.size() == 0) {
         options.idx = options.mtx + ".index";
+    }
+
+    if (options.covar_idx.size() == 0) {
+        options.covar_idx = options.covar_mtx + ".index";
     }
 
     return EXIT_SUCCESS;

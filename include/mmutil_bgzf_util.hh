@@ -53,10 +53,12 @@ int visit_bgzf_block(const std::string bgz_file,
 template <typename FUN>
 int
 visit_bgzf_block(const std::string bgz_file,
-                 const Index beg_pos,
-                 const Index end_pos,
+                 const Index beg_,
+                 const Index end_,
                  FUN &fun)
 {
+    const Index beg_pos = beg_;
+    const Index end_pos = end_;
 
     typedef enum _state_t { S_WORD, S_EOW } state_t;
     strbuf_t strbuf;
@@ -125,7 +127,10 @@ visit_bgzf_block(const std::string bgz_file,
         }
 
         if (num_cols < 3) {
+            std::cerr << std::endl;
             WLOG("mmutil_bgzf_util.hh: Found this incomplete line: " << str->s);
+            // WLOG("check this memory locations: " << beg_pos << ", " << end_pos);
+            std::cerr << std::endl;
             state = S_EOW;
             continue;
         }

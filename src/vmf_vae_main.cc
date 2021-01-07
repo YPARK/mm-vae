@@ -62,7 +62,28 @@ main(const int argc, const char *argv[])
     const int64_t batch_size = main_options.batch_size;
     mmvae::mtx_data_block_t data_block(mtx_file, idx_file, batch_size);
 
+    // create another data loader for the covariates
+    auto covar_mtx_file = main_options.covar_mtx;
+    auto covar_idx_file = main_options.covar_idx;
+
+    if (!file_exists(covar_mtx_file)) {
+        covar_mtx_file = main_options.out + ".covar.mtx.gz";
+        covar_idx_file = covar_mtx_file + ".index";
+        create_ones_like(data_block, covar_mtx_file);
+        TLOG("No covariate file is given. So we use this: " << covar_mtx_file);
+        CHK(mmutil::index::build_mmutil_index(covar_mtx_file, covar_idx_file));
+    } else {
+        if (!file_exists(covar_idx_file))
+            CHK(mmutil::index::build_mmutil_index(covar_mtx_file,
+                                                  covar_idx_file));
+    }
+
+    mmvae::mtx_data_block_t covar_block(covar_mtx_file,
+                                        covar_idx_file,
+                                        batch_size);
+
     TLOG("Constructing a model");
+
     std::vector<mmvae::vmf::z_enc_dim> henc;
     std::vector<mmvae::vmf::z_dec_dim> hdec;
 
@@ -77,6 +98,7 @@ main(const int argc, const char *argv[])
                    [](const int64_t d) { return mmvae::vmf::z_dec_dim(d); });
 
     mmvae::vmf::vmf_vae_t model(mmvae::vmf::data_dim(data_block.nfeature()),
+                                mmvae::vmf::covar_dim(covar_block.nfeature()),
                                 mmvae::vmf::z_repr_dim(vmf_opt.latent),
                                 henc,
                                 hdec,
@@ -91,7 +113,7 @@ main(const int argc, const char *argv[])
     loss.max_rate = main_options.kl_max;
     loss.time_discount = main_options.kl_discount;
 
-    train_vae_model(model, recorder, data_block, train_opt, loss);
+    train_vae_model(model, recorder, data_block, covar_block, train_opt, loss);
 
     TLOG("Done");
     return EXIT_SUCCESS;

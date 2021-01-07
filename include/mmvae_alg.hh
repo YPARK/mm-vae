@@ -160,24 +160,23 @@ visit_vae_model(MODEL_PTR model, VISITOR &visitor, DATA_BLOCK &data_block)
 {
     const int64_t ntot = data_block.ntot();
     const int64_t batch_size = data_block.size();
-    int64_t nbatch = ntot / data_block.size();
-    if ((nbatch * data_block.size()) < ntot) {
+    int64_t nbatch = ntot / batch_size;
+    if ((nbatch * batch_size) < ntot) {
         ++nbatch;
     }
 
-    std::vector<typename DATA_BLOCK::Index> batch(data_block.size());
+    std::vector<typename DATA_BLOCK::Index> batch(batch_size);
 
-    TLOG("Batch size = " << data_block.size() << ", "
+    TLOG("Batch size = " << batch_size << ", "
                          << "Number of batches = " << nbatch);
 
     torch::Device device(torch::kCPU);
     model->to(device);
-    model->train(false);
 
     for (int64_t b = 0; b < nbatch; ++b) {
 
-        const int64_t lb = b * data_block.size();
-        const int64_t ub = (b + 1) * data_block.size();
+        const int64_t lb = b * batch_size;
+        const int64_t ub = (b + 1) * batch_size;
 
         for (int64_t j = 0; j < (ub - lb); ++j) {
             batch[j] = (lb + j) % ntot;
@@ -188,7 +187,7 @@ visit_vae_model(MODEL_PTR model, VISITOR &visitor, DATA_BLOCK &data_block)
         data_block.clear();
     }
 
-    visitor.update_on_epoch(model, data_block, batch);
+    // visitor.update_on_epoch(model, data_block, batch);
 
     TLOG("Done visit");
 }
@@ -201,21 +200,30 @@ void
 train_vae_model(MODEL_PTR model,
                 VISITOR &visitor,
                 DATA_BLOCK &data_block,
+                DATA_BLOCK &covar_block,
                 training_options_t &opt,
                 LOSS loss_fun)
 {
     TLOG("Training on " << (opt.device.type() == torch::kCUDA ? "GPU" : "CPU"));
 
     const int64_t ntot = data_block.ntot();
+
+    ASSERT(ntot == covar_block.ntot(),
+           "data and covar on the same set of data points");
+
     const int64_t batch_size = data_block.size();
-    int64_t nbatch = ntot / data_block.size();
-    if ((nbatch * data_block.size()) < ntot) {
+
+    ASSERT(batch_size == covar_block.size(),
+           "data and covar on the same batch size");
+
+    int64_t nbatch = ntot / batch_size;
+    if ((nbatch * batch_size) < ntot) {
         ++nbatch;
     }
 
-    std::vector<typename DATA_BLOCK::Index> batch(data_block.size());
+    std::vector<typename DATA_BLOCK::Index> batch(batch_size);
 
-    TLOG("Batch size = " << data_block.size() << ", "
+    TLOG("Batch size = " << batch_size << ", "
                          << "Number of batches = " << nbatch);
 
     using optim_t = torch::optim::Adam;
@@ -228,8 +236,8 @@ train_vae_model(MODEL_PTR model,
 
     std::random_device rd;
     std::mt19937 rng(rd());
-    std::uniform_int_distribution<> rboot(0, data_block.size() - 1);
-    std::vector<int64_t> ridx(data_block.size());
+    std::uniform_int_distribution<> rboot(0, batch_size - 1);
+    std::vector<int64_t> ridx(batch_size);
 
     auto _long_opt = torch::TensorOptions().dtype(torch::kLong);
 
@@ -242,21 +250,24 @@ train_vae_model(MODEL_PTR model,
 
         for (int64_t b = 0; b < nbatch; ++b) {
 
-            const int64_t lb = b * data_block.size();
-            const int64_t ub = (b + 1) * data_block.size();
+            const int64_t lb = b * batch_size;
+            const int64_t ub = (b + 1) * batch_size;
 
             for (int64_t j = 0; j < (ub - lb); ++j) {
                 batch[j] = (lb + j) % ntot;
             }
 
             data_block.read(batch);
+            covar_block.read(batch);
+
             torch::Tensor x = data_block.torch_tensor().to(opt.device);
+            torch::Tensor c = covar_block.torch_tensor().to(opt.device);
 
             model->train(true);
 
             // Calculate the loss function
             {
-                auto y = model->forward(x);
+                auto y = model->forward(x, c);
                 auto loss = loss_fun(x, y, epoch);
                 _loss = loss.sum();
                 float _loss_batch = _loss.item<float>();
@@ -279,8 +290,9 @@ train_vae_model(MODEL_PTR model,
                                      _long_opt);
 
                 torch::Tensor xboot = torch::index_select(x, 0, _ridx);
+                torch::Tensor cboot = torch::index_select(c, 0, _ridx);
 
-                auto yboot = model->forward(xboot);
+                auto yboot = model->forward(xboot, cboot);
                 auto loss = loss_fun(xboot, yboot, epoch);
 
                 adam.zero_grad();
@@ -290,16 +302,21 @@ train_vae_model(MODEL_PTR model,
                 adam.step();
             }
 
+            model->train(false);
+
             if ((epoch + 1) % opt.recording == 0) {
                 visitor.update_on_batch(model, data_block, batch);
             }
+
             data_block.clear();
+            covar_block.clear();
         }
 
         std::cerr << "\r";
         _loss_epoch /= batch_size * nbatch;
 
-        TLOG("t=" << (epoch + 1) << " " << _loss_epoch);
+        TLOG("[" << std::setw(20) << (epoch + 1) << "] " << std::setw(20)
+                 << _loss_epoch);
 
         if ((epoch + 1) % opt.recording == 0) {
             visitor.update_on_epoch(model, data_block, batch);

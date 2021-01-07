@@ -8,6 +8,8 @@
 #include <random>
 #include <chrono>
 
+#include "mmvae_mem.hh"
+
 // More customized loss function
 struct nb_loss_t {
 
@@ -49,18 +51,38 @@ main(const int argc, const char *argv[])
     if (!file_exists(main_options.mtx))
         return EXIT_FAILURE;
 
-    const auto mtx_file = main_options.mtx;
-    const auto idx_file = main_options.idx;
+    const std::string mtx_file = main_options.mtx;
+    const std::string idx_file = main_options.idx;
+    const int64_t batch_size = main_options.batch_size;
 
     if (!file_exists(idx_file))
         CHK(mmutil::index::build_mmutil_index(mtx_file, idx_file));
 
-    const int64_t batch_size = main_options.batch_size;
-
     // data loader from the .mtx file
     mmvae::mtx_data_block_t data_block(mtx_file, idx_file, batch_size);
 
+    // create another data loader for the covariates
+    auto covar_mtx_file = main_options.covar_mtx;
+    auto covar_idx_file = main_options.covar_idx;
+
+    if (!file_exists(covar_mtx_file)) {
+        covar_mtx_file = main_options.out + ".covar.mtx.gz";
+        covar_idx_file = covar_mtx_file + ".index";
+        create_ones_like(data_block, covar_mtx_file);
+        TLOG("No covariate file is given. So we use this: " << covar_mtx_file);
+        CHK(mmutil::index::build_mmutil_index(covar_mtx_file, covar_idx_file));
+    } else {
+        if (!file_exists(covar_idx_file))
+            CHK(mmutil::index::build_mmutil_index(covar_mtx_file,
+                                                  covar_idx_file));
+    }
+
+    mmvae::mtx_data_block_t covar_block(covar_mtx_file,
+                                        covar_idx_file,
+                                        batch_size);
+
     TLOG("Constructing a model");
+
     std::vector<mmvae::nb::mu_encoder_h_dim> henc;
     std::vector<mmvae::nb::mu_decoder_h_dim> hdec;
 
@@ -79,6 +101,7 @@ main(const int argc, const char *argv[])
                    });
 
     mmvae::nb::nbvae_t model(mmvae::nb::data_dim(data_block.nfeature()),
+                             mmvae::nb::covar_dim(covar_block.nfeature()),
                              henc,
                              hdec,
                              mmvae::nb::mu_encoder_r_dim(nb_opt.mean_latent),
@@ -88,6 +111,7 @@ main(const int argc, const char *argv[])
                                  nb_opt.overdispersion_latent),
                              nb_opt.do_relu);
 
+    TLOG("Training the model...");
     mmvae::nb::nbvae_recorder_t recorder(main_options.out, train_opt.max_epoch);
 
     nb_loss_t loss;
@@ -95,11 +119,8 @@ main(const int argc, const char *argv[])
     loss.max_rate = main_options.kl_max;
     loss.time_discount = main_options.kl_discount;
 
-    train_vae_model(model, recorder, data_block, train_opt, loss);
-    TLOG("Writing down results...");
+    train_vae_model(model, recorder, data_block, covar_block, train_opt, loss);
 
-    visit_vae_model(model, recorder, data_block);
-    recorder.write("");
     TLOG("Done");
     return EXIT_SUCCESS;
 }

@@ -39,6 +39,7 @@ using pos_size_t = check_positive_t<int64_t>;
     };
 
 DIM(data_dim);
+DIM(covar_dim);
 DIM(z_enc_dim);
 DIM(z_repr_dim);
 DIM(z_dec_dim);
@@ -197,6 +198,7 @@ struct vmf_vae_out_t {
 struct vmf_vae_tImpl : torch::nn::Module {
 
     explicit vmf_vae_tImpl(const data_dim,
+                           const covar_dim,
                            const z_repr_dim,
                            const std::vector<z_enc_dim>,
                            const std::vector<z_dec_dim>,
@@ -205,6 +207,7 @@ struct vmf_vae_tImpl : torch::nn::Module {
                            const bool);
 
     const int64_t x_dim;
+    const int64_t c_dim;
     const int64_t z_dim;
     const bool do_relu;
 
@@ -213,9 +216,12 @@ struct vmf_vae_tImpl : torch::nn::Module {
 
     std::pair<torch::Tensor, torch::Tensor> encode(torch::Tensor x);
 
-    vmf_vae_out_t forward(torch::Tensor x);
+    std::pair<torch::Tensor, torch::Tensor> encode(torch::Tensor x,
+                                                   torch::Tensor c);
 
-    torch::Tensor decode(torch::Tensor z);
+    vmf_vae_out_t forward(torch::Tensor x, torch::Tensor c);
+
+    torch::Tensor decode(torch::Tensor z, torch::Tensor c);
 
 private:
     template <typename VEC>
@@ -228,8 +234,12 @@ private:
 
     torch::Tensor ln_kappa;
 
+    torch::nn::Linear covar_enc { nullptr };
+
     torch::nn::Sequential z_enc;
     torch::nn::Sequential z_dec;
+
+    torch::nn::Linear covar_dec { nullptr };
 
     torch::nn::Linear z_repr_mean { nullptr };
     torch::nn::Linear z_repr_lnvar { nullptr };
@@ -239,37 +249,55 @@ private:
 };
 
 std::pair<torch::Tensor, torch::Tensor>
+vmf_vae_tImpl::encode(torch::Tensor x, torch::Tensor c)
+{
+    const float eps = 1e-2 / static_cast<float>(x.size(1));
+    namespace F = torch::nn::functional;
+    auto xn = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
+
+    auto xn_std =
+        torch::div(torch::sub(xn, x_mean), F::softplus(ln_x_sd) + eps);
+
+    auto h = z_enc->forward(xn_std); // x -> E[z]
+    auto hc = covar_enc->forward(c); // c -> E[z]
+    auto ln_var_clamp = torch::clamp(z_repr_lnvar->forward(h), -4., 4.);
+
+    return { z_repr_mean->forward(h + hc), ln_var_clamp };
+}
+
+std::pair<torch::Tensor, torch::Tensor>
 vmf_vae_tImpl::encode(torch::Tensor x)
 {
     const float eps = 1e-2 / static_cast<float>(x.size(1));
     namespace F = torch::nn::functional;
     auto xn = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
+
     auto xn_std =
         torch::div(torch::sub(xn, x_mean), F::softplus(ln_x_sd) + eps);
 
     auto h = z_enc->forward(xn_std);
-
     auto ln_var_clamp = torch::clamp(z_repr_lnvar->forward(h), -4., 4.);
 
     return { z_repr_mean->forward(h), ln_var_clamp };
 }
 
 torch::Tensor
-vmf_vae_tImpl::decode(torch::Tensor z)
+vmf_vae_tImpl::decode(torch::Tensor z, torch::Tensor c)
 {
     namespace F = torch::nn::functional;
     auto h = torch::exp(z_dec->forward(z));
-    return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
+    auto hc = covar_dec->forward(c);
+    return F::normalize(h + hc, F::NormalizeFuncOptions().p(2).dim(1));
 }
 
 vmf_vae_out_t
-vmf_vae_tImpl::forward(torch::Tensor x)
+vmf_vae_tImpl::forward(torch::Tensor x, torch::Tensor c)
 {
-    auto enc_ = encode(x);
+    auto enc_ = encode(x, c);
     auto mean_ = enc_.first;
     auto lnvar_ = enc_.second;
 
-    auto recon = decode(reparameterize(mean_, lnvar_));
+    auto recon = decode(reparameterize(mean_, lnvar_), c);
 
     auto kappa_clamp = torch::clamp(torch::exp(ln_kappa), kap_min, kap_max);
 
@@ -277,14 +305,16 @@ vmf_vae_tImpl::forward(torch::Tensor x)
 }
 
 /// Build the network
-vmf_vae_tImpl::vmf_vae_tImpl(const data_dim d_,
+vmf_vae_tImpl::vmf_vae_tImpl(const data_dim xd_,
+                             const covar_dim cd_,
                              const z_repr_dim z_,
                              const std::vector<z_enc_dim> ze_vec_,
                              const std::vector<z_dec_dim> zd_vec_,
                              const kappa_min _kmin = kappa_min { 1. },
                              const kappa_max _kmax = kappa_max { 100. },
                              const bool do_relu_ = false)
-    : x_dim(d_.val)
+    : x_dim(xd_.val)
+    , c_dim(cd_.val)
     , z_dim(z_.val)
     , kap_min(_kmin.val)
     , kap_max(_kmax.val)
@@ -323,6 +353,9 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim d_,
         d_prev = z_dim;
     }
 
+    covar_enc =
+        register_module("covar: encoding", torch::nn::Linear(c_dim, z_dim));
+
     z_repr_mean = register_module("z: representation mean",
                                   torch::nn::Linear(d_prev, z_dim));
 
@@ -348,6 +381,9 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim d_,
 
     // Add final one mapping to the reconstruction
     z_dec->push_back(torch::nn::Linear(d_prev, x_dim));
+
+    covar_dec =
+        register_module("covar: decoding", torch::nn::Linear(c_dim, x_dim));
 }
 
 /// Gaussian reparameterization

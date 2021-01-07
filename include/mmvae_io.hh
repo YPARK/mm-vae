@@ -23,72 +23,6 @@ find_consecutive_blocks(const std::vector<Index> &index_tab,
                         const std::vector<Index> &subcol,
                         const Index gap);
 
-////////////////////////////////////////////////
-// A MTX file visitor that collects triplets  //
-////////////////////////////////////////////////
-
-template <typename T>
-struct _triplet_reader_t {
-    using scalar_t = float;
-    using index_t = std::ptrdiff_t;
-    using Triplet = T;
-    using TripletVec = std::vector<T>;
-
-    using index_map_t = std::unordered_map<index_t, index_t>;
-
-    explicit _triplet_reader_t(TripletVec &_tvec,
-                               index_map_t &_remap,
-                               const index_t _nnz = 0)
-        : Tvec(_tvec)
-        , remap(_remap)
-        , NNZ(_nnz)
-    {
-        max_row = 0;
-        max_col = 0;
-        max_elem = 0;
-        if (NNZ > 0) {
-            Tvec.reserve(NNZ);
-        }
-        ASSERT(remap.size() > 0, "Empty Remap");
-    }
-
-    void set_file(BGZF *_fp) { fp = _fp; }
-
-    void eval_after_header(const index_t r, const index_t c, const index_t e)
-    {
-        max_row = r;
-        max_col = c;
-        max_elem = e;
-    }
-
-    void eval(const index_t row, const index_t col, const scalar_t weight)
-    {
-        if (remap.count(col) > 0) {
-            Tvec.emplace_back(T(row, remap[col], weight));
-        }
-    }
-
-    void eval_end_of_file()
-    {
-#ifdef DEBUG
-        if (Tvec.size() < NNZ) {
-            WLOG("This file may have lost elements : " << Tvec.size() << " vs. "
-                                                       << NNZ);
-        }
-        TLOG("Tvec : " << Tvec.size() << " vs. " << NNZ << " vs. " << max_elem);
-#endif
-    }
-
-    BGZF *fp;
-
-    index_t max_row;
-    index_t max_col;
-    index_t max_elem;
-    TripletVec &Tvec;
-    index_map_t &remap;
-    const index_t NNZ;
-};
-
 //////////////////////////////
 // Matrix Market data block //
 //////////////////////////////
@@ -117,7 +51,7 @@ struct mtx_data_block_t {
     Index nfeature() const { return D; }
     Index ntot() const { return N; }
 
-    std::tuple<Index, Index> dim() const { return std::tie(D, N); }
+    std::tuple<Index, Index> dim() const { return { D, N }; }
 
     /// Populate the memory by reading the data from .mtx
     /// @param subcol
@@ -135,21 +69,16 @@ struct mtx_data_block_t {
     }
 
 private:
-    using std_triplet_t = std::tuple<Index, Index, Scalar>;
-    using _reader_t = _triplet_reader_t<std_triplet_t>;
     using vec_vec_t = std::vector<std::vector<Index>>;
 
 private:
     void init();
 
-    Index D;                    // # features
-    Index N;                    // # total samples
-    std::vector<Index> idx_tab; // matrix column index tab
-
+    Index D;                     // # features
+    Index N;                     // # total samples
+    std::vector<Index> idx_tab;  // matrix column index tab
     std::vector<Scalar> mem_vec; // temporary data holder
-
-    _reader_t::TripletVec Tvec; // keep accumulating this
-    vec_vec_t dup;              // keep track of duplicates
+    vec_vec_t dup;               // keep track of duplicates
 
     struct _mem_reader_t {
         using Index = std::ptrdiff_t;
@@ -176,7 +105,7 @@ private:
             if (remap.count(col) == 0)
                 return;
 
-            for (auto j : dup.at(remap.at(col))) {
+            for (Index j : dup.at(remap.at(col))) {
                 const Index i = j * D + r; // row major position
                 mem_vec[i] = weight;       // write it down
             }
@@ -267,8 +196,8 @@ mtx_data_block_t::read(const std::vector<Index> &subcol)
     std::copy(std::begin(subcol), std::end(subcol), std::begin(sorted));
     std::sort(std::begin(sorted), std::end(sorted));
 
-    _reader_t::index_map_t col2idx; // large index -> small index
-    _reader_t::index_map_t idx2col; // vice versa
+    _mem_reader_t::index_map_t col2idx; // large index -> small index
+    _mem_reader_t::index_map_t idx2col; // vice versa
 
     for (std::size_t j = 0; j < sorted.size(); ++j) {
         if (col2idx.count(sorted[j]) < 1) {
@@ -286,27 +215,9 @@ mtx_data_block_t::read(const std::vector<Index> &subcol)
 
     const auto blocks = find_consecutive_blocks(idx_tab, subcol);
 
-    // Tvec.clear();
-    // for (auto block : blocks) {
-    //     _reader_t reader(Tvec, col2idx);
-    //     CHK(mmutil::bgzf::visit_bgzf_block(mtx_file,
-    //                                        block.lb_mem,
-    //                                        block.ub_mem,
-    //                                        reader));
-    // }
-
-    // for (auto tt : Tvec) {
-    //     Index r, k;
-    //     Scalar w;
-    //     std::tie(r, k, w) = tt;        //
-    //     for (auto j : dup[k]) {        //
-    //         const Index i = j * D + r; // column major -> row major
-    //         mem_vec[i] = w;
-    //     }
-    // }
-
     for (auto block : blocks) {
         _mem_reader_t mreader(D, col2idx, dup, mem_vec);
+
         CHK(mmutil::bgzf::visit_bgzf_block(mtx_file,
                                            block.lb_mem,
                                            block.ub_mem,
@@ -319,25 +230,6 @@ mtx_data_block_t::clear()
 {
     // This is faster than disk I/O
     std::fill(std::begin(mem_vec), std::end(mem_vec), 0);
-
-    // for (auto tt : Tvec) {
-    //     Index r, k;
-    //     Scalar w;
-    //     std::tie(r, k, w) = tt;        //
-    //     for (auto j : dup[k]) {        //
-    //         const Index i = j * D + r; // column major -> row major
-    //         mem_vec[i] = 0.;           // clear the info
-    //     }
-    // }
-    // Tvec.clear();
-
-    // for (auto block : blocks) {
-    //     _mem_cleaner_t mcleaner(D, col2idx, dup, mem_vec);
-    //     CHK(mmutil::bgzf::visit_bgzf_block(mtx_file,
-    //                                        block.lb_mem,
-    //                                        block.ub_mem,
-    //                                        mcleaner));
-    // }
 
     for (Index k = 0; k < size(); ++k) {
         dup[k].clear();
@@ -354,14 +246,14 @@ mtx_data_block_t::init()
     CHK(mmutil::bgzf::peek_bgzf_header(mtx_file, info));
     D = info.rows(); // dimensionality
     N = info.cols(); // total number of samplse
-    TLOG("Sparse Mtx Data: " << D << " x " << N);
+    TLOG("Sparse Mtx Data: " << D << " x " << N << " from " << mtx_file);
 
     //////////////////////////////////////
     // 2. Index tab for a quick look-up //
     //////////////////////////////////////
     idx_tab.clear();
     mmutil::index::read_mmutil_index(idx_file, idx_tab);
-    TLOG("Read the index tab for the columns");
+    TLOG("Read the index tab for the columns: " << idx_file);
 
     // mmutil::index::check_index_tab(mtx_file, idx_tab);
     // TLOG("Checked the index tab");
@@ -376,6 +268,26 @@ mtx_data_block_t::init()
     for (Index k = 0; k < size(); ++k) {
         dup.emplace_back(std::vector<Index> {});
     }
+}
+
+void
+create_ones_like(const mtx_data_block_t &data_block, const std::string out_file)
+{
+    using T = Eigen::Triplet<mtx_data_block_t::Scalar>;
+    std::vector<T> triplets;
+    const auto ntot = data_block.ntot();
+    triplets.reserve(ntot);
+    for (auto j = 0; j < data_block.ntot(); ++j) {
+        triplets.emplace_back(T(0, j, 1.));
+    }
+
+    Eigen::SparseMatrix<mtx_data_block_t::Scalar,
+                        Eigen::RowMajor,
+                        mtx_data_block_t::Index>
+        _covar(1, ntot);
+
+    _covar.setFromTriplets(triplets.begin(), triplets.end());
+    write_matrix_market_file(out_file, _covar);
 }
 
 } // namespace

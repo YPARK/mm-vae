@@ -39,6 +39,7 @@ using pos_size_t = check_positive_t<int64_t>;
     };
 
 DIM(data_dim);
+DIM(covar_dim);
 DIM(mu_encoder_h_dim);
 DIM(mu_decoder_h_dim);
 DIM(mu_encoder_r_dim);
@@ -211,6 +212,7 @@ struct nbvae_out_t {
 struct nbvae_tImpl : torch::nn::Module {
 
     explicit nbvae_tImpl(const data_dim,
+                         const covar_dim,
                          const std::vector<mu_encoder_h_dim>,
                          const std::vector<mu_decoder_h_dim>,
                          const mu_encoder_r_dim,
@@ -219,21 +221,26 @@ struct nbvae_tImpl : torch::nn::Module {
                          const bool _do_relu);
 
     // Encoding the mu of NB model -> mean, lnvar (mean)
+    std::pair<torch::Tensor, torch::Tensor> encode_mu(torch::Tensor x,
+                                                      torch::Tensor c);
+
+    // Encoding the mu of NB model -> mean, lnvar (mean)
     std::pair<torch::Tensor, torch::Tensor> encode_mu(torch::Tensor x);
 
     // Encoding the nu of NB model -> mean, lnvar (overdispersion)
     std::pair<torch::Tensor, torch::Tensor> encode_nu(torch::Tensor x);
 
     // Decoding the mu of NB model
-    torch::Tensor decode_mu(torch::Tensor z);
+    torch::Tensor decode_mu(torch::Tensor z, torch::Tensor c);
 
     // Decoding the nu of NB model
     torch::Tensor decode_nu(torch::Tensor z);
 
     // Forward pass: mu (log), nu (log)
-    nbvae_out_t forward(torch::Tensor x);
+    nbvae_out_t forward(torch::Tensor x, torch::Tensor c);
 
     const int64_t x_dim;
+    const int64_t c_dim;
     const int64_t mu_r_dim;
     const int64_t nu_h_dim;
     const int64_t nu_r_dim;
@@ -260,8 +267,12 @@ private:
 
     torch::nn::Sequential mu_enc;
 
+    torch::nn::Linear covar_enc { nullptr };
+
     torch::nn::Linear mu_repr_mean { nullptr };
     torch::nn::Linear mu_repr_lnvar { nullptr };
+
+    torch::nn::Linear covar_dec { nullptr };
 
     torch::nn::Sequential mu_dec;
 
@@ -287,14 +298,16 @@ torch::Tensor loss(torch::Tensor x, nbvae_out_t y, float kl_weight);
 // details //
 /////////////
 
-nbvae_tImpl::nbvae_tImpl(const data_dim _d,
+nbvae_tImpl::nbvae_tImpl(const data_dim _xd,
+                         const covar_dim _cd,
                          const std::vector<mu_encoder_h_dim> _eh_vec,
                          const std::vector<mu_decoder_h_dim> _dh_vec,
                          const mu_encoder_r_dim _mr,
                          const nu_encoder_h_dim _oh,
                          const nu_encoder_r_dim _or,
                          const bool _do_relu = true)
-    : x_dim(_d.val)
+    : x_dim(_xd.val)
+    , c_dim(_cd.val)
     , mu_r_dim(_mr.val)
     , nu_h_dim(_oh.val)
     , nu_r_dim(_or.val)
@@ -314,8 +327,6 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     // hidden encoding layers for mu //
     ///////////////////////////////////
 
-    // ASSERT(_eh_vec.size() > 0, "at least one dim info for a hidden
-    // layer(s)");
     _copy_dim_vec(_eh_vec, mu_eh_dim_vec);
 
     // Add hidden layers between x and representation
@@ -323,7 +334,6 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     for (int l = 0; l < mu_eh_dim_vec.size(); ++l) {
         int64_t d_next = mu_eh_dim_vec[l];
         mu_enc->push_back(torch::nn::Linear(d_prev, d_next));
-        // mu_enc->push_back(mmvae::Angular(d_prev, d_next));
         if (do_relu)
             mu_enc->push_back(torch::nn::ReLU(d_next));
         d_prev = d_next;
@@ -332,12 +342,14 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     // Add final one mapping to the latent
     if (mu_eh_dim_vec.size() < 1) {
         mu_enc->push_back(torch::nn::Linear(d_prev, mu_r_dim));
-        // mu_enc->push_back(mmvae::Angular(d_prev, mu_r_dim));
         if (do_relu)
             mu_enc->push_back(torch::nn::ReLU(mu_r_dim));
 
         d_prev = mu_r_dim;
     }
+
+    covar_enc =
+        register_module("covar: encoding", torch::nn::Linear(c_dim, mu_r_dim));
 
     mu_repr_mean = register_module("mu: representation mean",
                                    torch::nn::Linear(d_prev, mu_r_dim));
@@ -349,8 +361,6 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
     // hidden decoding layers for mu //
     ///////////////////////////////////
 
-    // ASSERT(_dh_vec.size() > 0, "at least one dim info for a hidden
-    // layer(s)");
     _copy_dim_vec(_dh_vec, mu_dh_dim_vec);
 
     // Add hidden layers between representation and x
@@ -366,6 +376,9 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
 
     // Add final one mapping to the reconstruction
     mu_dec->push_back(torch::nn::Linear(d_prev, x_dim));
+
+    covar_dec =
+        register_module("covar: decoding", torch::nn::Linear(c_dim, x_dim));
 
     ///////////////////////////////////
     // hidden encoding layers for nu //
@@ -389,26 +402,43 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _d,
 }
 
 std::pair<torch::Tensor, torch::Tensor>
-nbvae_tImpl::encode_mu(torch::Tensor x)
+nbvae_tImpl::encode_mu(torch::Tensor x, torch::Tensor c)
 {
-    const float eps = 1e-2;
-
+    const float eps = 1e-4;
     namespace F = torch::nn::functional;
     auto xn = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
     auto xn_std =
         torch::div(torch::sub(xn, x_mean), F::softplus(ln_x_sd) + eps);
 
-    auto h = mu_enc->forward(xn_std);
+    auto h = mu_enc->forward(xn_std); // x -> E[z]
+    auto hc = covar_enc->forward(c);  // c -> E[z]
+
+    auto ln_var_clamp = torch::clamp(mu_repr_lnvar->forward(h), -4., 4.);
+
+    return { mu_repr_mean->forward(h + hc), ln_var_clamp };
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+nbvae_tImpl::encode_mu(torch::Tensor x)
+{
+    const float eps = 1e-4;
+    namespace F = torch::nn::functional;
+    auto xn = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
+    auto xn_std =
+        torch::div(torch::sub(xn, x_mean), F::softplus(ln_x_sd) + eps);
+
+    auto h = mu_enc->forward(xn_std); // x -> E[z]
     auto ln_var_clamp = torch::clamp(mu_repr_lnvar->forward(h), -4., 4.);
 
     return { mu_repr_mean->forward(h), ln_var_clamp };
 }
 
 torch::Tensor
-nbvae_tImpl::decode_mu(torch::Tensor z)
+nbvae_tImpl::decode_mu(torch::Tensor z, torch::Tensor c)
 {
     auto h = mu_dec->forward(z);
-    return torch::exp(torch::log_softmax(h, 1) + mu_bias);
+    auto hc = covar_dec->forward(c);
+    return torch::exp(torch::log_softmax(h + hc + mu_bias, 1));
 }
 
 std::pair<torch::Tensor, torch::Tensor>
@@ -442,15 +472,15 @@ nbvae_tImpl::reparameterize(torch::Tensor mu, torch::Tensor lnvar)
 }
 
 nbvae_out_t
-nbvae_tImpl::forward(torch::Tensor x)
+nbvae_tImpl::forward(torch::Tensor x, torch::Tensor c)
 {
     ///////////////////////////
     // Reparameterization mu //
     ///////////////////////////
-    auto mu_enc_out = encode_mu(x);
+    auto mu_enc_out = encode_mu(x, c);
     auto mu_mean = mu_enc_out.first;
     auto mu_lnvar = mu_enc_out.second;
-    auto mu_ = decode_mu(reparameterize(mu_mean, mu_lnvar));
+    auto mu_ = decode_mu(reparameterize(mu_mean, mu_lnvar), c);
 
     /////////////////////
     // over-dispersion //
@@ -504,10 +534,10 @@ loss(torch::Tensor x, nbvae_out_t y, float kl_weight = 1.)
 {
     auto recon_loss = nllik_loss(x, y);
     const float n = x.size(0);
-    auto ret = recon_loss / n;
-    ret += kl_loss(y.mu_mean, y.mu_lnvar) * kl_weight / n;
-    ret += kl_loss(y.nu_mean, y.nu_lnvar) * kl_weight / n;
-    return ret;
+    auto ret = recon_loss;
+    ret += kl_loss(y.mu_mean, y.mu_lnvar) * kl_weight;
+    ret += kl_loss(y.nu_mean, y.nu_lnvar) * kl_weight;
+    return ret / n;
 }
 
 //////////////////////
@@ -550,15 +580,14 @@ struct nbvae_recorder_t {
     template <typename MODEL, typename DB, typename BAT>
     void update_on_batch(MODEL &model, DB &db, BAT &batches)
     {
-        model->train(false); // freeze the model
-
         const int64_t ntot = db.ntot();
 
         ///////////////////////
         // output mu encoder //
         ///////////////////////
 
-        auto mu_out = model->encode_mu(db.torch_tensor().to(torch::kCPU));
+        auto x = db.torch_tensor().to(torch::kCPU);
+        auto mu_out = model->encode_mu(x);
         torch::Tensor _mean = std::get<0>(mu_out);
         torch::Tensor _lnvar = std::get<1>(mu_out);
 
@@ -575,18 +604,18 @@ struct nbvae_recorder_t {
         Eigen::Map<Mat> _mean_mat(_mean.data_ptr<float>(),
                                   _mean.size(0),
                                   _mean.size(1));
+
         Eigen::Map<Mat> _lnvar_mat(_lnvar.data_ptr<float>(),
                                    _lnvar.size(0),
                                    _lnvar.size(1));
 
         for (int64_t j = 0; j < batches.size(); ++j) {
-            if (batches[j] < ntot) {
-                mean_out.row(batches[j]) = _mean_mat.row(j);
-                lnvar_out.row(batches[j]) = _lnvar_mat.row(j);
+            const int64_t r = batches[j];
+            if (r < ntot) {
+                mean_out.row(r) = _mean_mat.row(j);
+                lnvar_out.row(r) = _lnvar_mat.row(j);
             }
         }
-
-        model->train(true); // release
     }
 
     void write(const std::string tag)
