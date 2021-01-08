@@ -262,7 +262,7 @@ vmf_vae_tImpl::encode(torch::Tensor x, torch::Tensor c)
     auto hc = covar_enc->forward(c); // c -> E[z]
     auto ln_var_clamp = torch::clamp(z_repr_lnvar->forward(h), -4., 4.);
 
-    return { z_repr_mean->forward(h + hc), ln_var_clamp };
+    return { z_repr_mean->forward(h) + hc, ln_var_clamp };
 }
 
 std::pair<torch::Tensor, torch::Tensor>

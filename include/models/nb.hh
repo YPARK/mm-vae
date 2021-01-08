@@ -284,7 +284,6 @@ private:
 
     std::vector<int64_t> mu_eh_dim_vec;
     std::vector<int64_t> mu_dh_dim_vec;
-
     torch::nn::Linear depth { nullptr };
 };
 
@@ -406,16 +405,15 @@ nbvae_tImpl::encode_mu(torch::Tensor x, torch::Tensor c)
 {
     const float eps = 1e-4;
     namespace F = torch::nn::functional;
-    auto xn = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
-    auto xn_std =
-        torch::div(torch::sub(xn, x_mean), F::softplus(ln_x_sd) + eps);
+    auto x_sd = F::softplus(ln_x_sd);
 
+    auto xn_std = torch::div(x.log1p() - x_mean, x_sd + eps);
     auto h = mu_enc->forward(xn_std); // x -> E[z]
     auto hc = covar_enc->forward(c);  // c -> E[z]
 
     auto ln_var_clamp = torch::clamp(mu_repr_lnvar->forward(h), -4., 4.);
 
-    return { mu_repr_mean->forward(h + hc), ln_var_clamp };
+    return { mu_repr_mean->forward(h) + hc, ln_var_clamp };
 }
 
 std::pair<torch::Tensor, torch::Tensor>
@@ -423,10 +421,9 @@ nbvae_tImpl::encode_mu(torch::Tensor x)
 {
     const float eps = 1e-4;
     namespace F = torch::nn::functional;
-    auto xn = F::normalize(x.log1p(), F::NormalizeFuncOptions().p(2).dim(1));
-    auto xn_std =
-        torch::div(torch::sub(xn, x_mean), F::softplus(ln_x_sd) + eps);
+    auto x_sd = F::softplus(ln_x_sd);
 
+    auto xn_std = torch::div(x.log1p() - x_mean, x_sd + eps);
     auto h = mu_enc->forward(xn_std); // x -> E[z]
     auto ln_var_clamp = torch::clamp(mu_repr_lnvar->forward(h), -4., 4.);
 
@@ -438,25 +435,28 @@ nbvae_tImpl::decode_mu(torch::Tensor z, torch::Tensor c)
 {
     auto h = mu_dec->forward(z);
     auto hc = covar_dec->forward(c);
-    return torch::exp(torch::log_softmax(h + hc + mu_bias, 1));
+
+    // auto ln_mu = torch::clamp(h + hc + mu_bias, -4., 4.);
+    auto logit_mu = torch::log_softmax(h + hc + mu_bias, 1);
+    return torch::exp(logit_mu);
 }
 
 std::pair<torch::Tensor, torch::Tensor>
 nbvae_tImpl::encode_nu(torch::Tensor x)
 {
     namespace F = torch::nn::functional;
-    auto h = F::relu(nu_enc->forward(x));
-
+    auto h = nu_enc->forward(x);
     auto ln_var_clamp = torch::clamp(nu_repr_lnvar->forward(h), -4., 4.);
-
     return { nu_repr_mean->forward(h), ln_var_clamp };
 }
 
 torch::Tensor
 nbvae_tImpl::decode_nu(torch::Tensor z)
 {
-    auto ret = torch::exp(nu_dec->forward(z) - nu_bias);
-    return torch::clamp(ret, 0., nu_max);
+    namespace F = torch::nn::functional;
+    // auto ret = torch::exp(nu_dec->forward(z) - nu_bias);
+    auto ret = F::softplus(nu_dec->forward(z) - nu_bias);
+    return torch::clamp(ret, 1e-4, nu_max);
 }
 
 torch::Tensor
@@ -497,6 +497,13 @@ nbvae_tImpl::forward(torch::Tensor x, torch::Tensor c)
 
     auto d_ = torch::softplus(depth->forward(x));
 
+    // [1] recon_mu;
+    // [2] recon_nu;
+    // [3] depth;
+    // [4] mu_mean;
+    // [5] mu_lnvar;
+    // [6] nu_mean;
+    // [7] nu_lnvar;
     return { mu_, nu_, d_, mu_mean, mu_lnvar, nu_mean, nu_lnvar };
 }
 
