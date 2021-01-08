@@ -253,10 +253,6 @@ struct nbvae_tImpl : torch::nn::Module {
 
     const bool do_relu;
 
-private:
-    template <typename VEC>
-    void _copy_dim_vec(const VEC &src, std::vector<int64_t> &dst);
-
     torch::Tensor reparameterize(torch::Tensor mu, torch::Tensor lnvar);
 
     torch::Tensor x_mean;
@@ -285,6 +281,9 @@ private:
     std::vector<int64_t> mu_eh_dim_vec;
     std::vector<int64_t> mu_dh_dim_vec;
     torch::nn::Linear depth { nullptr };
+
+    template <typename VEC>
+    void _copy_dim_vec(const VEC &src, std::vector<int64_t> &dst);
 };
 
 /// loss function for NB-VAE
@@ -332,15 +331,17 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _xd,
     int64_t d_prev = x_dim;
     for (int l = 0; l < mu_eh_dim_vec.size(); ++l) {
         int64_t d_next = mu_eh_dim_vec[l];
-        mu_enc->push_back(torch::nn::Linear(d_prev, d_next));
+        const std::string str_ = "mu_encoding_" + std::to_string(l + 1);
+        mu_enc->push_back(str_, *torch::nn::Linear(d_prev, d_next));
         if (do_relu)
-            mu_enc->push_back(torch::nn::ReLU(d_next));
+            mu_enc->push_back(str_, *torch::nn::ReLU(d_next));
         d_prev = d_next;
     }
 
     // Add final one mapping to the latent
     if (mu_eh_dim_vec.size() < 1) {
-        mu_enc->push_back(torch::nn::Linear(d_prev, mu_r_dim));
+        const std::string str_ = "mu_encoding";
+        mu_enc->push_back(str_, *torch::nn::Linear(d_prev, mu_r_dim));
         if (do_relu)
             mu_enc->push_back(torch::nn::ReLU(mu_r_dim));
 
@@ -348,12 +349,12 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _xd,
     }
 
     covar_enc =
-        register_module("covar: encoding", torch::nn::Linear(c_dim, mu_r_dim));
+        register_module("covar_encoding", torch::nn::Linear(c_dim, mu_r_dim));
 
-    mu_repr_mean = register_module("mu: representation mean",
+    mu_repr_mean = register_module("mu_representation_mean",
                                    torch::nn::Linear(d_prev, mu_r_dim));
 
-    mu_repr_lnvar = register_module("mu: representation log variance",
+    mu_repr_lnvar = register_module("mu_representation_logvariance",
                                     torch::nn::Linear(d_prev, mu_r_dim));
 
     ///////////////////////////////////
@@ -366,32 +367,31 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _xd,
     d_prev = mu_r_dim;
     for (int l = 0; l < mu_dh_dim_vec.size(); ++l) {
         int64_t d_next = mu_dh_dim_vec[l];
-        const std::string _str = "mu: decoding " + std::to_string(l + 1);
-        mu_dec->push_back(torch::nn::Linear(d_prev, d_next));
+        const std::string str_ = "mu_decoding_" + std::to_string(l + 1);
+        mu_dec->push_back(str_, *torch::nn::Linear(d_prev, d_next));
         if (do_relu)
             mu_dec->push_back(torch::nn::ReLU(d_next));
         d_prev = d_next;
     }
 
     // Add final one mapping to the reconstruction
-    mu_dec->push_back(torch::nn::Linear(d_prev, x_dim));
+    const std::string str_ = "mu_decoding";
+    mu_dec->push_back(str_, *torch::nn::Linear(d_prev, x_dim));
 
     covar_dec =
-        register_module("covar: decoding", torch::nn::Linear(c_dim, x_dim));
+        register_module("covar_decoding", torch::nn::Linear(c_dim, x_dim));
 
     ///////////////////////////////////
     // hidden encoding layers for nu //
     ///////////////////////////////////
 
-    nu_enc =
-        register_module("nu: encoding", torch::nn::Linear(x_dim, nu_h_dim));
+    nu_enc = register_module("nu_encoding", torch::nn::Linear(x_dim, nu_h_dim));
 
-    nu_repr_mean = register_module("nu: representation mean",
+    nu_repr_mean = register_module("nu_representation mean",
                                    torch::nn::Linear(nu_h_dim, nu_r_dim));
-    nu_repr_lnvar = register_module("nu: representation log variance",
+    nu_repr_lnvar = register_module("nu_representation_logvariance",
                                     torch::nn::Linear(nu_h_dim, nu_r_dim));
-    nu_dec =
-        register_module("nu: decoding", torch::nn::Linear(nu_r_dim, x_dim));
+    nu_dec = register_module("nu_decoding", torch::nn::Linear(nu_r_dim, x_dim));
 
     //////////////////////
     // sequencing depth //
@@ -571,17 +571,44 @@ struct nbvae_recorder_t {
     using Mat =
         Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
+    using Vec = Eigen::Matrix<float, Eigen::Dynamic, 1>;
+
     explicit nbvae_recorder_t(const std::string _hdr, const int64_t _max_epoch)
         : header(_hdr)
-        , epoch(0)
         , max_epoch(_max_epoch)
     {
     }
 
-    template <typename MODEL, typename DB, typename BAT>
-    void update_on_epoch(MODEL &model, DB &db, BAT &batches)
+    template <typename MODEL>
+    void update_on_epoch(MODEL &model, const int64_t epoch)
     {
-        write(zeropad(++epoch, max_epoch));
+
+        ////////////
+        // latent //
+        ////////////
+
+        const std::string _hdr_tag = header + "_" + zeropad(epoch, max_epoch);
+
+        write_data_file(_hdr_tag + ".mu_mean.gz", mean_out);
+        write_data_file(_hdr_tag + ".mu_lnvar.gz", lnvar_out);
+
+        ////////////////
+        // parameters //
+        ////////////////
+
+        for (const auto &pp : model->named_parameters(true)) {
+            const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
+            torch::Tensor param_ = pp.value().to(torch::kCPU);
+            if (param_.dim() == 2) {
+                Eigen::Map<Mat> param(param_.data_ptr<float>(),
+                                      param_.size(0),
+                                      param_.size(1));
+                write_data_file(file_, param);
+            } else if (param_.dim() < 2) {
+                Eigen::Map<Vec> param(param_.data_ptr<float>(), param_.numel());
+                write_data_file(file_, param);
+            }
+        }
     }
 
     template <typename MODEL, typename DB, typename BAT>
@@ -625,16 +652,7 @@ struct nbvae_recorder_t {
         }
     }
 
-    void write(const std::string tag)
-    {
-        const std::string _hdr_tag =
-            tag.size() > 0 ? (header + "_" + tag) : header;
-        write_data_file(_hdr_tag + ".mu_mean.gz", mean_out);
-        write_data_file(_hdr_tag + ".mu_lnvar.gz", lnvar_out);
-    }
-
     const std::string header; // file header
-    int64_t epoch;
     const int64_t max_epoch;
     Mat mean_out, lnvar_out;
 };

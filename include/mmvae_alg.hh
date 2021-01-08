@@ -20,9 +20,11 @@ struct training_options_t {
         nboot = 3;
         max_epoch = 101;
         recording = 10;
+        grad_clip = 1.;
     }
 
     float lr;          // 1e-3;
+    float grad_clip;   // 1
     int64_t nboot;     // 3;
     int64_t max_epoch; // 31;
     int64_t recording; // 3;
@@ -38,18 +40,21 @@ parse_training_options(const int argc,
     const char *_usage = "[Training algorithm options]\n"
                          "\n"
                          "--lr         : learning rate (default: 1e-3)\n"
+                         "--grad_clip  : gradient clip (default: 1)\n"
                          "--nboot      : #bootstrapped gradients (default: 3)\n"
                          "--max_epoch  : maximum #epoch (default: 101)\n"
                          "--recording  : recording interval (default: 10)\n"
                          "\n";
 
-    const char *const short_opts = "L:B:E:R:h";
+    const char *const short_opts = "L:G:B:E:R:h";
 
     const option long_opts[] = {
         { "lr", required_argument, nullptr, 'L' },            //
         { "learning", required_argument, nullptr, 'L' },      //
         { "learn_rate", required_argument, nullptr, 'L' },    //
         { "learning_rate", required_argument, nullptr, 'L' }, //
+        { "rate", required_argument, nullptr, 'L' },          //
+        { "grad_clip", required_argument, nullptr, 'G' },     //
         { "nboot", required_argument, nullptr, 'B' },         //
         { "boot", required_argument, nullptr, 'B' },          //
         { "bootstrap", required_argument, nullptr, 'B' },     //
@@ -196,7 +201,7 @@ template <typename MODEL_PTR,
           typename VISITOR,
           typename DATA_BLOCK,
           typename LOSS>
-void
+std::vector<float>
 train_vae_model(MODEL_PTR model,
                 VISITOR &visitor,
                 DATA_BLOCK &data_block,
@@ -232,7 +237,7 @@ train_vae_model(MODEL_PTR model,
     model->to(opt.device);
     model->pretty_print(std::cerr);
 
-    const float grad_clip = 1e-2;
+    const float grad_clip = opt.grad_clip;
 
     std::random_device rd;
     std::mt19937 rng(rd());
@@ -242,6 +247,9 @@ train_vae_model(MODEL_PTR model,
     auto _long_opt = torch::TensorOptions().dtype(torch::kLong);
 
     torch::Tensor _loss(torch::zeros({ 1 }));
+
+    std::vector<float> loss_vec;
+    loss_vec.reserve(opt.max_epoch);
 
     for (int64_t epoch = 0; epoch < opt.max_epoch; ++epoch) {
         const float t = epoch;
@@ -318,11 +326,15 @@ train_vae_model(MODEL_PTR model,
         TLOG("[" << std::setw(20) << (epoch + 1) << "] " << std::setw(20)
                  << _loss_epoch);
 
+        loss_vec.emplace_back(_loss_epoch);
+
         if ((epoch + 1) % opt.recording == 0) {
-            visitor.update_on_epoch(model, data_block, batch);
+            visitor.update_on_epoch(model, epoch);
         }
     }
     TLOG("Done training");
+
+    return loss_vec;
 }
 
 #endif

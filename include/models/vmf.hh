@@ -338,7 +338,8 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim xd_,
 
     for (int l = 0; l < z_enc_dim_vec.size(); ++l) {
         int64_t d_next = z_enc_dim_vec[l];
-        z_enc->push_back(mmvae::Angular(d_prev, d_next));
+        const std::string str_ = "encoding_" + std::to_string(l + 1);
+        z_enc->push_back(str_, *mmvae::Angular(d_prev, d_next));
         if (do_relu)
             z_enc->push_back(torch::nn::ReLU(d_next));
         d_prev = d_next;
@@ -346,6 +347,7 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim xd_,
 
     // Add final one mapping to the latent
     if (z_enc_dim_vec.size() < 1) {
+        const std::string str_ = "encoding";
         z_enc->push_back(mmvae::Angular(d_prev, z_dim));
         if (do_relu)
             z_enc->push_back(torch::nn::ReLU(z_dim));
@@ -354,12 +356,12 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim xd_,
     }
 
     covar_enc =
-        register_module("covar: encoding", torch::nn::Linear(c_dim, z_dim));
+        register_module("covar_encoding", torch::nn::Linear(c_dim, z_dim));
 
-    z_repr_mean = register_module("z: representation mean",
+    z_repr_mean = register_module("representation_mean",
                                   torch::nn::Linear(d_prev, z_dim));
 
-    z_repr_lnvar = register_module("z: representation log variance",
+    z_repr_lnvar = register_module("representation_logvariance",
                                    torch::nn::Linear(d_prev, z_dim));
 
     //////////////////////////////////
@@ -372,18 +374,19 @@ vmf_vae_tImpl::vmf_vae_tImpl(const data_dim xd_,
     d_prev = z_dim;
     for (int l = 0; l < z_dec_dim_vec.size(); ++l) {
         int64_t d_next = z_dec_dim_vec[l];
-        const std::string _str = "z: decoding " + std::to_string(l + 1);
-        z_dec->push_back(torch::nn::Linear(d_prev, d_next));
+        const std::string str_ = "decoding_" + std::to_string(l + 1);
+        z_dec->push_back(str_, *torch::nn::Linear(d_prev, d_next));
         if (do_relu)
             z_dec->push_back(torch::nn::ReLU(d_next));
         d_prev = d_next;
     }
 
     // Add final one mapping to the reconstruction
-    z_dec->push_back(torch::nn::Linear(d_prev, x_dim));
+    const std::string str_ = "decoding";
+    z_dec->push_back(str_, *torch::nn::Linear(d_prev, x_dim));
 
     covar_dec =
-        register_module("covar: decoding", torch::nn::Linear(c_dim, x_dim));
+        register_module("covar_decoding_", torch::nn::Linear(c_dim, x_dim));
 }
 
 /// Gaussian reparameterization
@@ -457,18 +460,45 @@ struct vmf_vae_recorder_t {
     using Mat =
         Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
+    using Vec = Eigen::Matrix<float, Eigen::Dynamic, 1>;
+
     explicit vmf_vae_recorder_t(const std::string _hdr,
                                 const int64_t _max_epoch)
         : header(_hdr)
-        , epoch(0)
         , max_epoch(_max_epoch)
     {
     }
 
-    template <typename MODEL, typename DB, typename BAT>
-    void update_on_epoch(MODEL &model, DB &db, BAT &batches)
+    template <typename MODEL>
+    void
+    update_on_epoch(MODEL &model, const int64_t epoch)
     {
-        write(zeropad(++epoch, max_epoch));
+
+        ////////////
+        // latent //
+        ////////////
+
+        const std::string _hdr_tag = header + "_" + zeropad(epoch, max_epoch);
+        write_data_file(_hdr_tag + ".latent_mean.gz", mean_out);
+        write_data_file(_hdr_tag + ".latent_lnvar.gz", lnvar_out);
+
+        ////////////////
+        // parameters //
+        ////////////////
+
+        for (const auto &pp : model->named_parameters(true)) {
+            const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
+            torch::Tensor param_ = pp.value().to(torch::kCPU);
+            if (param_.dim() == 2) {
+                Eigen::Map<Mat> param(param_.data_ptr<float>(),
+                                      param_.size(0),
+                                      param_.size(1));
+                write_data_file(file_, param);
+            } else if (param_.dim() < 2) {
+                Eigen::Map<Vec> param(param_.data_ptr<float>(), param_.numel());
+                write_data_file(file_, param);
+            }
+        }
     }
 
     template <typename MODEL, typename DB, typename BAT>
@@ -513,16 +543,7 @@ struct vmf_vae_recorder_t {
         model->train(true); // release
     }
 
-    void write(const std::string tag)
-    {
-        const std::string _hdr_tag =
-            tag.size() > 0 ? (header + "_" + tag) : header;
-        write_data_file(_hdr_tag + ".latent_mean.gz", mean_out);
-        write_data_file(_hdr_tag + ".latent_lnvar.gz", lnvar_out);
-    }
-
     const std::string header; // file header
-    int64_t epoch;
     const int64_t max_epoch;
     Mat mean_out, lnvar_out;
 };

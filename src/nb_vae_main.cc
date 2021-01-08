@@ -119,7 +119,14 @@ main(const int argc, const char *argv[])
     loss.max_rate = main_options.kl_max;
     loss.time_discount = main_options.kl_discount;
 
-    train_vae_model(model, recorder, data_block, covar_block, train_opt, loss);
+    auto scores = train_vae_model(model,
+                                  recorder,
+                                  data_block,
+                                  covar_block,
+                                  train_opt,
+                                  loss);
+
+    write_vector_file(main_options.out + ".scores.gz", scores);
 
     TLOG("Done");
     return EXIT_SUCCESS;
