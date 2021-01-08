@@ -8,6 +8,25 @@ namespace mmvae {
 using Scalar = float;
 using Index = std::ptrdiff_t;
 
+void
+write_tensor(const std::string file_, torch::Tensor param_)
+{
+    using Mat =
+        Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
+    using Vec = Eigen::Matrix<float, Eigen::Dynamic, 1>;
+
+    if (param_.dim() == 2) {
+        Eigen::Map<Mat> param(param_.data_ptr<float>(),
+                              param_.size(0),
+                              param_.size(1));
+        write_data_file(file_, param);
+    } else if (param_.dim() < 2) {
+        Eigen::Map<Vec> param(param_.data_ptr<float>(), param_.numel());
+        write_data_file(file_, param);
+    }
+}
+
 struct memory_block_t {
     Index lb;
     Index lb_mem;

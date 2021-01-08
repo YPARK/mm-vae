@@ -387,7 +387,7 @@ nbvae_tImpl::nbvae_tImpl(const data_dim _xd,
 
     nu_enc = register_module("nu_encoding", torch::nn::Linear(x_dim, nu_h_dim));
 
-    nu_repr_mean = register_module("nu_representation mean",
+    nu_repr_mean = register_module("nu_representation_mean",
                                    torch::nn::Linear(nu_h_dim, nu_r_dim));
     nu_repr_lnvar = register_module("nu_representation_logvariance",
                                     torch::nn::Linear(nu_h_dim, nu_r_dim));
@@ -596,18 +596,22 @@ struct nbvae_recorder_t {
         // parameters //
         ////////////////
 
+        for (const auto &pp : model->mu_enc->named_parameters(true)) {
+            const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
+            torch::Tensor param_ = pp.value().to(torch::kCPU);
+            write_tensor(file_, param_);
+        }
+
+        for (const auto &pp : model->mu_dec->named_parameters(true)) {
+            const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
+            torch::Tensor param_ = pp.value().to(torch::kCPU);
+            write_tensor(file_, param_);
+        }
+
         for (const auto &pp : model->named_parameters(true)) {
             const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
             torch::Tensor param_ = pp.value().to(torch::kCPU);
-            if (param_.dim() == 2) {
-                Eigen::Map<Mat> param(param_.data_ptr<float>(),
-                                      param_.size(0),
-                                      param_.size(1));
-                write_data_file(file_, param);
-            } else if (param_.dim() < 2) {
-                Eigen::Map<Vec> param(param_.data_ptr<float>(), param_.numel());
-                write_data_file(file_, param);
-            }
+            write_tensor(file_, param_);
         }
     }
 

@@ -223,10 +223,6 @@ struct vmf_vae_tImpl : torch::nn::Module {
 
     torch::Tensor decode(torch::Tensor z, torch::Tensor c);
 
-private:
-    template <typename VEC>
-    void _copy_dim_vec(const VEC &src, std::vector<int64_t> &dst);
-
     torch::Tensor reparameterize(torch::Tensor mu, torch::Tensor lnvar);
 
     torch::Tensor x_mean;
@@ -246,6 +242,9 @@ private:
 
     std::vector<int64_t> z_enc_dim_vec;
     std::vector<int64_t> z_dec_dim_vec;
+
+    template <typename VEC>
+    void _copy_dim_vec(const VEC &src, std::vector<int64_t> &dst);
 };
 
 std::pair<torch::Tensor, torch::Tensor>
@@ -470,8 +469,7 @@ struct vmf_vae_recorder_t {
     }
 
     template <typename MODEL>
-    void
-    update_on_epoch(MODEL &model, const int64_t epoch)
+    void update_on_epoch(MODEL &model, const int64_t epoch)
     {
 
         ////////////
@@ -486,18 +484,22 @@ struct vmf_vae_recorder_t {
         // parameters //
         ////////////////
 
+        for (const auto &pp : model->z_enc->named_parameters(true)) {
+            const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
+            torch::Tensor param_ = pp.value().to(torch::kCPU);
+            write_tensor(file_, param_);
+        }
+
+        for (const auto &pp : model->z_dec->named_parameters(true)) {
+            const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
+            torch::Tensor param_ = pp.value().to(torch::kCPU);
+            write_tensor(file_, param_);
+        }
+
         for (const auto &pp : model->named_parameters(true)) {
             const std::string file_ = _hdr_tag + "_" + pp.key() + ".gz";
             torch::Tensor param_ = pp.value().to(torch::kCPU);
-            if (param_.dim() == 2) {
-                Eigen::Map<Mat> param(param_.data_ptr<float>(),
-                                      param_.size(0),
-                                      param_.size(1));
-                write_data_file(file_, param);
-            } else if (param_.dim() < 2) {
-                Eigen::Map<Vec> param(param_.data_ptr<float>(), param_.numel());
-                write_data_file(file_, param);
-            }
+            write_tensor(file_, param_);
         }
     }
 
